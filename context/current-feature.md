@@ -1,21 +1,20 @@
 # Current Feature
 
-## Project Setup
+## Session-Lease Spike
 
-**Status:** Complete
-**Branch:** `chore/project-setup`
+**Status:** Next
+**Branch:** `spike/session-lease` (from `dev`; throwaway, never merges)
+**Plan:** `context/decisions/direction-change.md` (Spike section). Background: `context/decisions/architecture-assessment.md`
 
 ### Goals
 
-- `CLAUDE.md` and context files (`ai-guidelines.md`, `coding-standards.md`, `current-feature.md`, `project-schema.md`)
-- `context/specs/ext-0.1-save-guard-spec.md`
-- `manifest.json`, an empty `index.js` that loads in SillyTavern, `package.json` (test script only), `LICENSE`, `README.md`
-- `test/` with one passing placeholder test, so `node --test` runs
+Prove or disprove that one active SillyTavern page at a time ("Use here" session lease) is safe and tolerable in real ST. Report each checklist item pass / fail before any spec or app change.
 
 ### Notes
 
-- `manifest.json` `loading_order` is a placeholder: the spec's "(verify) loads before Memory Books" is checked when the guard is built (Phase 1)
-- Manual checks (user): the extension installs and loads in SillyTavern with no console errors; two-tab check on a throwaway chat that an old copy of a chat really saves over newer messages
+- **Per-save guard stopped** 2026-11-20 (owner decision). `ext-0.1-save-guard-spec.md` is marked superseded and kept for its source findings. Slice 1 (core + settings) is on `feature/save-guard` (`wip`, pushed, not merged), kept for the fallback
+- The TravelingTavern app is blocked on the spike's result
+- `project-schema.md` and `CLAUDE.md` still describe the guard; revised after the spike
 
 ## History
 

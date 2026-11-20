@@ -1,3 +1,5 @@
+> Superseded 2026-11-20 by the session-lease direction. Kept for its source findings. Do not implement.
+
 # TravelingTavern Extension `v0.1.0` — Save Guard
 
 New public repo `TravelingTavern-Extension`. Built **before** the app's `0.1.20` (`fix-stale-page-overwrites-spec.md`), which includes it as a submodule. All decisions: user + design reviews, 2026-11-20.
