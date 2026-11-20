@@ -1,0 +1,12 @@
+{
+    "display_name": "TravelingTavern",
+    "loading_order": 1,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "",
+    "author": "Tiffany Warner",
+    "version": "0.0.1",
+    "homePageUrl": "https://github.com/Tiffany-Warner/TravelingTavern-Extension",
+    "auto_update": false
+}

@@ -1,0 +1,9 @@
+{
+    "name": "travelingtavern-extension",
+    "private": true,
+    "description": "SillyTavern extension that stops pages from saving stale copies over newer data.",
+    "license": "Apache-2.0",
+    "scripts": {
+        "test": "node --test"
+    }
+}
