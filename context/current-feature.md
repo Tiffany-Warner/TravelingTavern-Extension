@@ -2,7 +2,7 @@
 
 ## Project Setup
 
-**Status:** In progress
+**Status:** Complete
 **Branch:** `chore/project-setup`
 
 ### Goals
@@ -20,3 +20,9 @@
 ## History
 
 <!-- One entry per completed feature / fix, 3–5 lines max: what changed, cause/key decisions, gotchas, what's unverified, version. No verification logs or test counts. Nothing private. -->
+
+### 2026-11-20 — Project setup
+- Added `CLAUDE.md`, context files, the v0.1 save guard spec, `manifest.json` (`0.0.1`), a placeholder `index.js`, `package.json` (test script only) and a placeholder test
+- The app's spec stays in the app repo only, not here
+- Two-tab check confirmed: an old copy of a chat saves over newer messages, so the chat guard is needed
+- Unverified: whether `loading_order: 1` loads before Memory Books (Phase 1)

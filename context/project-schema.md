@@ -30,11 +30,11 @@
 > Goal: The repo is ready for work.
 
 - [ ] Public repo `TravelingTavern-Extension`; `dev` branch created from `main`; `main` protected
-- [ ] `CLAUDE.md` and context files (`ai-guidelines.md`, `coding-standards.md`, `current-feature.md`, `project-schema.md`)
-- [ ] `context/specs/ext-0.1-save-guard-spec.md`
-- [ ] `manifest.json`, empty `index.js` that loads in SillyTavern, `LICENSE`, `README.md`
-- [ ] `test/` folder with one passing placeholder test, so `node --test` runs
-- [ ] Two-tab check on a throwaway chat: an old copy of a chat really saves over newer messages (the chat guard is built on this)
+- [x] `CLAUDE.md` and context files (`ai-guidelines.md`, `coding-standards.md`, `current-feature.md`, `project-schema.md`)
+- [x] `context/specs/ext-0.1-save-guard-spec.md`
+- [x] `manifest.json`, empty `index.js` that loads in SillyTavern, `LICENSE`, `README.md`
+- [x] `test/` folder with one passing placeholder test, so `node --test` runs
+- [x] Two-tab check on a throwaway chat: an old copy of a chat really saves over newer messages (the chat guard is built on this)
 
 ---
 
