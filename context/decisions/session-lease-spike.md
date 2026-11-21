@@ -64,6 +64,25 @@ TravelingTavern app (debug build) on the Pixel 8, pointed at the test install ov
 - **Pre-request lease check from the Pixel over Tailscale:** 11–49 ms, one 123 ms; about 27 checks on page load
 - Not run in stage 1: native writes while parked, takeover while generating between app and desktop (need app code: stage 2)
 
+## Part 2, stage 2: app spike code
+
+Extension v5 (app hooks: state reports, native Use here, foreground check) and an app spike on a local branch in the app repo, built as a separate app (`.spike` applicationId, refuses any server not on the test install's port). The page reports its lease state to Kotlin; Kotlin shows a native scrim, checks the lease before every bridge command, writes the background release itself (OkHttp), and asks the page to check on return.
+
+| Check | Result |
+|---|---|
+| Starts parked while the desktop holds the lease | Pass: native "In use on another device" + Use here on every tab |
+| Native actions (+, send) blocked up front | Pass: scrim swallows taps; bridge commands refused by the Kotlin pre-check, never left on a held request |
+| Requests at page load before the extension decides | Pass: reads only (`/csrf-token`, `/version`, `/api/secrets/read`, `/api/settings/get`, `/api/extensions/discover`, lease reads); ST's `settings/save` held; nothing from `bridge.js` or clean mode |
+| "Visual" bridge commands while parked | Pass for data, but `setAppState` isn't visual: on return it runs the persona sync, whose request the page's wrapper held |
+| Background release with JavaScript paused | Pass: page JS paused in the debugger, app sent to background; Kotlin wrote the marker for the exact claim |
+| Desktop after a background release / app returning after it | Pass: desktop claimed without a click; the returning app parked |
+| Foreground takeover only when released | Pass: stayed parked while the desktop held the lease |
+| Killed app | Pass: no marker; desktop shows Use here |
+| Takeover while generating, both directions | Pass: the claimer waited for `busy`; the reply was saved before the claim and shown after the switch |
+| Reply generating while the app goes to the background | **Fail:** the reply stalls until the app returns (see Findings) |
+
+- **Phone switch** (Use here → reopened chat): 6.6 s = claim 0.09 s, grace 1.0 s, verify + reload to the new page's first request 0.9 s, ST startup reads until "holder" 1.6 s, holder → `APP_READY` 2.6 s (about 25 serial lease checks, 20–40 ms each), reopen 0.4 s. The lease's share is about 1.8 s
+
 ## Findings
 
 - **False park of the real holder:** `/api/files/upload` answered 500 on a lease metadata write right after a takeover reload (seen 4 times, reproduced). Server error: `EPERM: operation not permitted, rename 'tt-session-lease.json.<n>' -> 'tt-session-lease.json'` from `write-file-atomic` (`renameSync`, no retry). Windows refuses to rename over a file another handle has open (a concurrent lease read, or a virus scanner on the fresh file). Transient
@@ -75,13 +94,18 @@ TravelingTavern app (debug build) on the Pixel 8, pointed at the test install ov
 - After updating the extension, one tab kept running cached code until closed
 - **`busy` sticks when a generation fails before it starts:** with no model connection ST fires `GENERATION_STARTED` and returns early with no end event; the next takeover waited the full 60 s timeout
 - After a takeover reload ST does not reconnect to the model unless its auto-connect option is on
+- **A reply stalls while the app is in the background.** The app never pauses its WebView (no `onPause()`, `pauseTimers()` or removal on stop). **Likely cause:** about 20 s after Home, Android's cached-app freezer freezes the WebView's renderer process (seen: `isFrozen=true` and the page stopped answering; a page heartbeat to confirm it didn't run, so the implementation must confirm the cause). The reply resumed only after the app returned; meanwhile the release stayed deferred and `busy` stayed `true`, so a desktop takeover would wait out the 60 s limit and the app's late reply would then be held and discarded
+- **The app's first load ran older cached extension code** after the extension was updated, until a reload. A page running stale lease code is a safety gap, not just an inconvenience
+- A release can be written late, as a frozen app thaws. Harmless by design: the marker names the old claim and the returning page bumps its epoch
 - Closing a tab doesn't release the lease by itself: without the release marker every desktop switch after closing the holder costs a **Use here** click. The marker is best effort (a crash or killed browser skips it), so **Use here** stays the fallback
 
 ## Verdict
 
 The session lease protects every data type tested with one rule and no knowledge of ST's save endpoints. Parking is tolerable with held requests: ST stays quiet behind the overlay, and a switch costs about 3.5 s. It is **not safe as spiked**: one exemption let a parked tab overwrite real user files, and a transient Windows error parks the real holder. Both have clear fixes (below). Proceed to a spec with the requirements below, then run part 2 (the app) on a separate install before building the release.
 
-**Update after the re-check (v4–v4.2):** both fixes, release on tab close and the back/forward-cache handling pass on the test install. Open before the spec: part 2 (the app), `busy` stuck after an early generation failure, WebSockets, check cost from the Pixel.
+**Update after the re-check (v4–v4.2):** both fixes, release on tab close and the back/forward-cache handling pass on the test install.
+
+**Final (after part 2):** the spike is complete. The lease works between desktop tabs and the app in every case tested, including takeovers during a reply, a background release with JavaScript paused and a killed app; nothing reached the server from a parked page. The app needs native support (parked state, up-front blocking, release from Kotlin), and a reply in the background is an open decision. **Next step: the spec**, built from the requirements below. Still unchecked: WebSockets.
 
 ## Requirements for the spec
 
@@ -96,7 +120,7 @@ The session lease protects every data type tested with one rule and no knowledge
 9. **Overlay** is a `<dialog>` opened with `showModal()`, re-raised whenever another dialog opens while parked; Escape can't close it
 10. **Reopen the chat after a takeover** from the lease's `active` (avatar or group id + chat file); don't let startup's empty `CHAT_CHANGED` erase it
 11. **Fail closed:** lease unreadable → park
-12. **Open:** WebSockets; Memory Books' default-file behavior in the holder; part 2 (app: hold first requests at document start, foreground takeover, release in background)
+12. **Open:** WebSockets; Memory Books' default-file behavior in the holder; whether the app holds first requests at document start (not built in the spike: everything before the extension decides was a read)
 13. **`coding-standards.md` must be updated** before building: the bounded retry delay and the grace wait are one-off delays. Allow one-off delays; keep the ban on polling and repeating timers. The spike's wait for `busy` re-reads the lease every second, which is polling: the spec must replace it or name it as a bounded exception
 14. **Testing:** every manual test, spike and cleanup on a separate SillyTavern install; no unreleased guard or lease code in the install in daily use
 15. **Release on tab close, best effort:** on `pagehide` the holder writes a separate release marker naming its exact claim (`holder` + `epoch`) with `fetch(..., { keepalive: true })` (not `sendBeacon`: the upload needs the CSRF header). It never writes the lease itself, so a later claim can't be undone. A new page treats the lease as free only if the marker matches the lease's holder and epoch; a released claim's `busy` is stale and not waited for. **Use here** stays the fallback when no marker was written
@@ -104,8 +128,14 @@ The session lease protects every data type tested with one rule and no knowledge
 17. **Back/forward cache:** `pagehide` also fires on entering the cache, so a holder restored from it (`pageshow` with `persisted`) parks at once and reloads; the fresh load re-checks the lease
 18. **Requests made before the start decision wait for it:** sent if the page turns out to be holder, held if parked (never held for good in a holder page)
 19. **`busy` must not stick after a generation that fails before it starts** (no end event): decide how the holder clears it, or how a claimer recognizes a stale `busy` without polling. The 60 s limit caps it until then
-20. **After a takeover reload, the model connection must be restored or the user told how.** On the phone every takeover is a reload; without a connection the user takes over a chat and can't generate a reply. The spec decides which (e.g. reconnect after a takeover reload, or require ST's auto-connect and say so); don't rely on auto-connect being on
+20. **After a takeover reload, the model connection must be restored or the user told how.** On the phone every takeover is a reload; without a connection the user takes over a chat and can't generate a reply. The spec decides which (e.g. reconnect after a takeover reload, or require ST's auto-connect and say so); don't rely on auto-connect being on. Seen again in part 2: the app's page had no model connection after every takeover reload
 21. **Allowlist of read-only endpoints** that skip the pre-request check in the holder (still held while parked). From the Pixel each check costs 11–49 ms and ST sends about 27 POST requests on load, most of them reads. Every listed endpoint is confirmed read-only in ST's source; anything not listed is checked
 22. **Phone switch time needs a timing breakdown before the spec:** **Use here** in the app takes about 6 s to the reopened chat (desktop 3.3 s). Measure claim, grace, reload, ST startup and chat reopen separately
 23. **The app shows the parked state natively on every screen** and blocks native actions (+, send) up front while parked, never leaving them on a held request. Found in stage 1: the native screens keep stale data with no sign while the WebView is parked
 24. **Only one lease write in flight at a time** (one queue for claims, epoch bumps and `busy` / `active` updates). Otherwise an update that read the lease before a returning holder's epoch bump can write the old epoch back, and the holder's release marker counts again (found while building stage 2; worst case another page takes over without a click)
+25. **A reply while the app goes to the background (owner's decision):** the app runs a `shortService` foreground service while a reply generates, so Android doesn't freeze the WebView. If Android's time limit ends the service first, the app interrupts the reply, releases the lease, and tells the user when it returns. A takeover never waits out the 60 s `busy` limit for a reply that can't finish. Likely cause of the stall: Android's cached-app freezer freezes the WebView's renderer about 20 s after Home (the app never pauses the WebView itself); the implementation must confirm it
+26. **Safety: after an extension update the app loads the current extension code, never a cached copy, and reports the guard version it is running.** A page on stale lease code may not hold the lease (the app's first load after an update ran older code)
+27. **Only truly visual bridge commands skip the Kotlin pre-check** (`revealMessage`, `endReveal`: DOM only). `setAppState` loses its exemption: on return it runs the persona sync, which reads and can save. Anything not confirmed visual is checked
+28. **The native parked scrim covers the whole screen,** including the bottom tab bar, and closes the keyboard and clears text focus when it appears
+29. **The native parked screen shows when it is waiting for a reply on the other device** (the page reports the claim's `busy` wait), not just "Taking over…"
+30. **An automatic claim (after a release) reopens the chat** from the lease's `active`, as Use here does
