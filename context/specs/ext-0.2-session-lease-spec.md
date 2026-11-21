@@ -33,7 +33,7 @@ Two small JSON files in the SillyTavern (ST) user's files. They belong to one ST
 
 ### Writing
 
-- `POST /api/files/upload`, ST's request headers (incl. its CSRF header), body `{ "name": "<file name>", "data": "<base64 of the UTF-8 JSON>" }`. ST writes the file atomically (temp file + rename)
+- `POST /api/files/upload` with the CSRF token the lease fetched itself (E6), body `{ "name": "<file name>", "data": "<base64 of the UTF-8 JSON>" }`. ST writes the file atomically (temp file + rename)
 - A write can fail transiently (Windows refuses the rename while another handle has the file open: `EPERM`, answered as 500). Retry rules: E3
 - Each file stays under 1 KB. No other files are written
 
@@ -101,7 +101,7 @@ No decision uses a clock time from the files: devices' clocks differ (seconds ap
     - **`busy: false`** → the page stays holder and keeps the pending `busy: false`: it is written with the holder's next lease write or lease check, until it lands, so the file never stays `busy: true` after a reply
 - **Skip unchanged writes:** no write when `busy` and `active` already have the values to be written
 - **A failed `busy: true` is not just metadata:** claimers wouldn't wait for the reply. The generation request is sent only after `busy: true` is written and confirmed (E8). If that write fails after the retry above, the request is **not sent**: the wrapper rejects it with an `AbortError` (as ST's Stop would), so ST ends the generation, and the page reports `leaseNotice` `replyNotStarted` (E11): desktop shows one toast, "Couldn't reach SillyTavern to start the reply. Try again."; the app shows its native notice (A7)
-- One-off delays (this retry, the grace wait in E4) are bounded and allowed; no repeating timers (`coding-standards.md`, R34)
+- One-off delays (this retry, the grace wait in E4, the CSRF ordering wait in E6) are bounded and allowed; no repeating timers (`coding-standards.md`, R34)
 
 ## 4. Claim and Takeover
 
@@ -140,7 +140,7 @@ Best effort, so closing the holder doesn't cost the next page a click (R15). The
 
 Wraps `window.fetch` and `XMLHttpRequest.prototype.open` / `send`. Nothing else in ST is patched.
 
-**Server data** = a path under `/api/` or `/user/`, or any method other than `GET`. Everything else (scripts, styles, templates, images, `/csrf-token`, `/version`) passes untouched.
+**Server data** = a path under `/api/` or `/user/` (compared lower-case, trailing slashes ignored), or any method other than `GET`. Everything else (scripts, styles, templates, images, `/version`) passes untouched; `/csrf-token` passes after the ordering wait below. Every `GET` outside `/api/` and `/user/` only reads (E15).
 
 | Page state | Server-data request |
 |---|---|
@@ -151,11 +151,14 @@ Wraps `window.fetch` and `XMLHttpRequest.prototype.open` / `send`. Nothing else 
 
 - **Exempts nothing** (R1): no request passes by URL while parked. The lease's own reads and writes use the original `fetch` captured at install, so they never pass through the wrapper
 - **Held** fetches return a promise that stays pending; only their path and reject function are kept, never the request, so no code path can send one later. Held XHRs are never sent and never complete. Refusing instead broke ST's startup in the spike
-- **`navigator.sendBeacon`** while parked returns `false` without sending
+- **A held fetch whose own `AbortSignal` fires** (e.g. ST's Stop) is rejected with an `AbortError` and removed from the held set at once, so it can never be sent, even after the page holds the lease again
+- **`navigator.sendBeacon`** returns `false` without sending unless the page is holder (it can't wait for a lease check; ST doesn't use it)
+- **CSRF token** (R42): the lease fetches its own token once at install, `GET /csrf-token` through the original `fetch` (served before ST's login check; `csrf-sync` returns the session's existing token without overwriting it, E15). Kept in memory only, never logged, never in a message. A lease write answered `403` fetches the token again once and resends
+- **CSRF ordering:** the session lives in a cookie, so two token requests on a session without a token yet would each create one and the later cookie wins. ST's own `GET /csrf-token` therefore waits until the lease's token fetch has finished, at most **2 s**, then is sent (never held), so ST's startup never stalls
 - **Fail closed** (R11): a lease read that fails parks the page and holds the request
-- **Allowlist** (R21): read-only `POST` endpoints, each confirmed read-only in ST's source for every tested ST version, kept in a named constant. Candidates seen in the spike, all **(verify)**: `/api/settings/get`, `/api/characters/all`, `/api/characters/get`, `/api/groups/all`, `/api/chats/get`, `/api/chats/group/get`, `/api/chats/recent`, `/api/worldinfo/get`, `/api/avatars/get`, `/api/backgrounds/all`, `/api/backgrounds/folders`, `/api/image-metadata/all`, `/api/secrets/read`, `/api/stats/get`, `/api/sd/comfy/workflows`, `/api/tokenizers/*/encode`, `/api/tokenizers/*/count`. Anything not listed is checked. Allowlisted requests are still held while parked. On an untested ST version the allowlist is off (E12)
+- **Allowlist** (R21): read-only `POST` endpoints, each confirmed read-only in ST's source for every tested ST version, kept in a named constant. Confirmed for 1.19.0 and 1.19.1 (E15): `/api/settings/get`, `/api/characters/all`, `/api/characters/get`, `/api/groups/all`, `/api/chats/get`, `/api/chats/group/get`, `/api/chats/recent`, `/api/worldinfo/get`, `/api/avatars/get`, `/api/backgrounds/folders`, `/api/image-metadata/all`, `/api/secrets/read`, `/api/stats/get`, `/api/sd/comfy/workflows`, `/api/tokenizers/*/encode`, `/api/tokenizers/*/count` (`*` is one path segment). **Not** `/api/backgrounds/all`: it rewrites `image-metadata.json`. Anything not listed is checked. Allowlisted requests are still held while parked. On an untested ST version the allowlist is off (E12)
 - **Before the extension loads** (desktop) ST sends only reads (`/csrf-token`, `/version`, `/api/secrets/read`, `/api/settings/get`, `/api/extensions/discover`; seen on 1.19.0 and 1.19.1). In the app the bundled copy is installed at document start, before any of them
-- **WebSockets: to check** (R31): whether ST or an extension sends server data over a WebSocket, which the wrapper doesn't see. A known limit until checked (E13)
+- **WebSockets** (R31, checked, E15): ST 1.19.0 / 1.19.1 has no WebSocket endpoint and opens none; streaming reads fetch bodies; no `sendBeacon`, workers or form posts. Third-party extensions and server plugins could still open one (E13)
 
 ## 7. Parking and Reloads
 
@@ -201,7 +204,7 @@ Shown by `index.js` from `tt-lease` events of type `leaseState` (E11). **Overlay
 | `reason` | Title | Line | Control |
 |---|---|---|---|
 | `held`, `lost` | In use on another device | Use SillyTavern here instead? | Use here |
-| `claiming` | Taking over… | Loading your chat on this device. | spinner |
+| `claiming` | Taking over… | Loading your chat on this device. If your browser asks whether to leave the site, choose Leave. | spinner |
 | `waitingForReply` | Finishing a reply… | Your other device is still writing a reply. | spinner |
 | `lostRace` | Another device took over | It claimed SillyTavern first. | Use here |
 | `unreadable` | Can't reach SillyTavern | Nothing is saved from this page. | Use here |
@@ -228,7 +231,7 @@ Everything the app and the extension rely on from each other. Changing any of it
 
 ### One lease instance per page (R40)
 
-- `session-lease.js` installs once per page, in the main frame only. It defines `window.__ttLease` as non-writable and non-configurable; a second copy that finds it already defined **stands down completely** (no wrapper, no lease reads, no messages)
+- `session-lease.js` installs once per page, in the main frame only, and **never on SillyTavern's login page** (URL pathname ending in `/login`, compared lower-case with trailing slashes ignored; the query string isn't part of the pathname). There the lease's files answer `403`, so it would park and hold the login request; the login page sends only ST's public `/api/users/*` requests. It defines `window.__ttLease` as non-writable and non-configurable; a second copy that finds it already defined **stands down completely** (no wrapper, no lease reads, no messages)
 - **In the app's page** the bundled copy is injected at document start, so it is always first. An installed extension then stands down for the lease, but still announces itself (`window.__ttExtension`, `tt-extension-ready`) so `leaseInfo` can report its version
 - **On desktop** `index.js` sets `window.__ttLeaseSource = 'extension'` and loads `session-lease.js`. A copy injected without that mark reports `source: 'app'`
 - Where reports go: if the app's `TravelingTavern` listener exists, to the app (messages below); otherwise a `tt-lease` `CustomEvent` on `window`, for `index.js`. Its `detail` is `{ type, ...fields }`: `type` is the message type (`leaseState`, `leaseInfo` or `leaseNotice`) and the fields are that message's, below. `index.js` drives the overlay from `leaseState` and the toasts from `leaseInfo` (untested ST version, E12) and `leaseNotice`
@@ -333,7 +336,8 @@ The app's own `window.__ttBridge` is not part of this contract.
 | Pages without the lease code (a desktop browser without the extension, the extension disabled, other ST clients, scripts) | They write freely | A server plugin that enforces the lease on the server |
 | A write slower than the grace period plus the new holder's reload | It could land after the new holder loaded (not seen in the spike, incl. a 3 MB save) | Server plugin: refuse writes from a page that isn't the holder |
 | Release is best effort | A crash leaves the lease held; the next page needs Use here | — (by design) |
-| WebSockets not checked (R31) | Unknown | Check, then wrap or rule out |
+| WebSockets from third-party extensions or server plugins (R31; ST itself has none, E15) | The wrapper doesn't see them | Server plugin, or wrap if one is found |
+| A page that parked while a message was being edited | ST's `beforeunload` asks "Leave site?" on the takeover reload (`this_edit_mes_id >= 0`; not cleared by aborting chat saves). Discarding the edit is correct: it is stale. Desktop: the overlay tells the user to choose Leave (E9). App: it confirms `onJsBeforeUnload` itself, only during a takeover reload (A2) | —
 | Memory Books writes default files in the holder when a read fails transiently (R32) | A transient server error can reset that extension's files | Outside the lease; report to Memory Books |
 | Switch cost (R22, measured) | Desktop about 3.3 s, phone about 6.6 s from Use here to the reopened chat; about 1.8 s of the phone's is the lease (grace and checks), the rest is ST reloading. The allowlist removes most of the check time | Server plugin (no reload needed) |
 | A reply can't move to another device | A takeover waits for the reply (up to 60 s), then reloads | — |
@@ -373,3 +377,15 @@ The app's own `window.__ttBridge` is not part of this contract.
 - [ ] Untested ST version: toast once, every request checked
 - [ ] Model connection restored after a Use here reload; not pressed after an automatic claim at start
 - [ ] The app's checks: app spec checklist
+
+## 15. Verified in SillyTavern's source
+
+Checked against the tags **1.19.0 and 1.19.1** (2026-11-20). Between them only `characters.js` (character import), `charx.js`, `users-admin.js`, `users-private.js` and a CSS fix in `public/scripts/chats.js` changed, none of it below.
+
+- **Allowlist (E6):** each handler read. Read-only for user data, with these side effects that never overwrite anything: `characters/all`, `characters/get` fill ST's character cache; `groups/all` and `chats/get` create an empty folder if missing; `secrets/read` creates an empty `secrets.json` only if none exists; tokenizers may download models into the global `_cache`. `stats/get` reads memory. **Excluded:** `backgrounds/all` (`getOrGenerateMetadataBatch` reads `image-metadata.json`, adds metadata and writes the whole index back, folder assignments included)
+- **Chat saves (E7):** `POST /api/chats/save`, `POST /api/chats/group/save` (`src/endpoints/chats.js`). `saveChatConditional` sets `isChatSaving` and clears it in `finally`; the group save returns on a failed fetch. ST's `beforeunload` prompts while `isChatSaving` or `this_edit_mes_id >= 0`
+- **CSRF (E6):** `src/server-main.js` registers `GET /csrf-token` before `requireLoginMiddleware`; `csrf-sync` 4.2.1 `generateToken(req)` returns the session's token unless `overwrite`; sessions are `cookie-session`. ST's page fetches its token in `firstLoadInit`
+- **Lease files:** `/user/files/*` answers 404 for a missing file, 403 when not logged in. `POST /api/files/upload` validates the name and writes with `writeFileSyncAtomic`
+- **Login page:** `GET /login` serves `login.html`; it requests `/csrf-token` and `/api/users/list`, `/login`, `/recover-step1`, `/recover-step2` only
+- **WebSockets and other channels (R31):** no WebSocket server in `src` (the `ws` dependency isn't imported), no `new WebSocket`, `EventSource`, `sendBeacon`, workers or service worker in `public` outside `public/lib`; streaming uses `EventSourceStream` over fetch bodies; `<form method="post">` elements use `action="javascript:void(null)"`. Memory Books and TopInfoBar on the test install: none either
+- **`GET /version`** answers `{ agent, pkgVersion, gitRevision, gitBranch, commitDate, isLatest }` (behind the login check)
