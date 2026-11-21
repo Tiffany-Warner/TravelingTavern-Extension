@@ -103,6 +103,26 @@
      */
     const GENERATION_PATHS = Object.freeze(['/api/backends/*/generate', '/api/novelai/generate', '/api/horde/generate-text']);
 
+    /** ST's `onlineStatus` while no model is connected (spec E10). */
+    const NO_CONNECTION = 'no_connection';
+    /**
+     * ST's connect button per `main_api` (spec E10): the buttons ST's own auto-connect presses
+     * (`RA_autoconnect`). Confirmed in ST 1.19.0 and 1.19.1. Other APIs (e.g. `koboldhorde`) have none.
+     */
+    const CONNECT_BUTTONS = Object.freeze({
+        kobold: '#api_button',
+        novel: '#api_button_novel',
+        textgenerationwebui: '#api_button_textgenerationwebui',
+        openai: '#api_button_openai',
+    });
+    /**
+     * The class ST's `startStatusLoading()` adds to every connect button while an attempt runs, and
+     * `stopStatusLoading()` removes (spec E10, E15).
+     */
+    const CONNECTING_CLASS = 'disabled';
+    /** After pressing connect, the page waits at most this long for ST's attempt (spec E10). */
+    const CONNECT_WAIT_MS = 10000;
+
     /** Messages (spec E11). */
     const MESSAGE_VERSION = 1;
     const APP_LISTENER = 'TravelingTavern';
@@ -665,6 +685,79 @@
         return JSON.stringify({ name, data: base64Utf8(JSON.stringify(value)) });
     }
 
+    // ---- SillyTavern's context: reopen and reconnect (spec E4, E10) ------------------------------
+
+    /**
+     * The open chat as the lease's `active` (spec E4), from a fresh `SillyTavern.getContext()`.
+     * @param {object|null} context ST's context (`groupId`, `characterId`, `characters`, `chatId`).
+     * @returns {object|null} `{ avatar, chatFile }`, `{ groupId, chatFile }`, or null without a chat.
+     */
+    function activeFromContext(context) {
+        if (!isObject(context) || !isText(context.chatId)) return null;
+        const groupId = context.groupId;
+        if (groupId !== null && groupId !== undefined && groupId !== '') {
+            return { groupId: String(groupId), chatFile: context.chatId };
+        }
+        const characters = Array.isArray(context.characters) ? context.characters : [];
+        const character = context.characterId === undefined ? undefined : characters[context.characterId];
+        if (!isObject(character) || !isText(character.avatar)) return null;
+        return { avatar: character.avatar, chatFile: context.chatId };
+    }
+
+    /**
+     * How to reopen the lease's `active` after a claim's reload (spec E4). Characters only: a group
+     * stays on ST's start screen (ST's `openGroupById` isn't in its context; the app reopens groups by
+     * its own route).
+     * @param {object|null} active The lease's `active` when this load became holder.
+     * @param {unknown} characters ST's `characters` array.
+     * @returns {{ action: 'none' } | { action: 'skip', why: 'group'|'missing' } | { action: 'open', index: number, chatFile: string }}
+     *     Nothing to reopen, skip (logged), or select the character at `index` and open `chatFile`.
+     */
+    function decideReopen(active, characters) {
+        if (!isObject(active)) return { action: 'none' };
+        if (isText(active.groupId)) return { action: 'skip', why: 'group' };
+        const list = Array.isArray(characters) ? characters : [];
+        const index = list.findIndex((character) => isObject(character) && character.avatar === active.avatar);
+        if (index === -1) return { action: 'skip', why: 'missing' };
+        return { action: 'open', index, chatFile: active.chatFile };
+    }
+
+    /**
+     * Whether to press ST's connect button after a claim's reload (spec E10). Only after Use here or
+     * the app's onForeground claim, never after the automatic claim, and only while not connected.
+     * @param {string|null} kind The claim that preceded this load (CLAIM_KIND), or null.
+     * @param {unknown} onlineStatus ST's `onlineStatus`.
+     * @param {unknown} mainApi ST's `mainApi`.
+     * @returns {{ action: 'none', why: 'automatic'|'connected' } | { action: 'press', button: string|null }}
+     *     Nothing, or press `button` (null: this API has none; the page still waits for ST's attempt).
+     */
+    function decideConnect(kind, onlineStatus, mainApi) {
+        if (kind !== CLAIM_KIND.useHere && kind !== CLAIM_KIND.foreground) return { action: 'none', why: 'automatic' };
+        if (onlineStatus !== NO_CONNECTION) return { action: 'none', why: 'connected' };
+        const button = Object.prototype.hasOwnProperty.call(CONNECT_BUTTONS, mainApi) ? CONNECT_BUTTONS[mainApi] : null;
+        return { action: 'press', button };
+    }
+
+    /**
+     * Whether ST is connected to a model (`leaseState.connected`, spec E10, E11).
+     * @param {object|null} context ST's context.
+     * @returns {boolean} False without a context or while `onlineStatus` is `no_connection`.
+     */
+    function isConnected(context) {
+        return isObject(context) && typeof context.onlineStatus === 'string' && context.onlineStatus !== NO_CONNECTION;
+    }
+
+    /**
+     * Whether ST's own connect attempt is running (spec E10): its button carries CONNECTING_CLASS from
+     * `startStatusLoading()` until `stopStatusLoading()`. A press then would start a second status check.
+     * @param {{ classList?: { contains: Function } }|null} button ST's connect button.
+     * @returns {boolean} True while an attempt runs.
+     */
+    function isConnecting(button) {
+        return isObject(button) && isObject(button.classList) && typeof button.classList.contains === 'function'
+            && button.classList.contains(CONNECTING_CLASS) === true;
+    }
+
     // ---- The lease ---------------------------------------------------------------------------
 
     /**
@@ -674,7 +767,7 @@
      * @param {(url: string, init?: object) => Promise<Response>} deps.fetch The original fetch, never the
      *     wrapped one. The browser glue adds ST's request headers (incl. its CSRF header) to POSTs.
      * @param {(type: string, payload: object) => void} deps.post Reports (spec E11); the browser glue
-     *     adds the page-only fields (`connected`, `origin`) and routes them to the app or `tt-lease`.
+     *     adds the page-only field `origin` and routes them to the app or `tt-lease`.
      * @param {() => number} deps.now Milliseconds since the epoch: timestamps and the bounded busy wait.
      * @param {(ms: number) => Promise<void>} deps.sleep Bounded one-off delay.
      * @param {{ getItem: Function, setItem: Function, removeItem: Function }} deps.storage This tab's
@@ -891,6 +984,17 @@
         }
 
         const tabId = loadTabId();
+
+        /**
+         * The reopen flag a claim set before its reload (spec E4), read and removed once per load, so
+         * only the load right after the claim reopens.
+         * @returns {string|null} The claim's CLAIM_KIND, or null.
+         */
+        function takeReopenFlag() {
+            const kind = storageGet(STORAGE_KEYS.reopen);
+            if (kind !== null) storageRemove(STORAGE_KEYS.reopen);
+            return Object.values(CLAIM_KIND).includes(kind) ? kind : null;
+        }
         const page = {
             /** This load's holder id, `<tab id>.<load id>` (spec E2): a new load id on every page load. */
             id: tabId + '.' + randomHex(8),
@@ -921,7 +1025,16 @@
             checkPromise: null,
             /** ST's version from `/version`; null until read. The allowlist is on only for tested ones. */
             stVersion: null,
+            /** ST is connected to a model (`leaseState.connected`, spec E10). */
+            connected: false,
+            /**
+             * After a claim's reload (spec E4, E10): the claim's kind, the lease's `active` when this load
+             * became holder, and `pending` until the reopen is over (chat changes aren't recorded meanwhile).
+             */
+            reopen: { kind: null, active: null, pending: false },
         };
+        page.reopen.kind = takeReopenFlag();
+        page.reopen.pending = page.reopen.kind !== null;
 
         /** ISO timestamp for the informational fields. */
         function timestamp() {
@@ -942,6 +1055,7 @@
                 pageId: page.id,
                 epoch: page.heldEpoch,
                 busy: page.busy,
+                connected: page.connected,
             };
             const key = JSON.stringify(payload);
             if (key === page.lastReport) return;
@@ -1035,8 +1149,11 @@
             if (outcome.status === 'parked') return park(outcome.reason);
             const pair = { holder: page.id, epoch: from.epoch + 1 };
             await sleep(GRACE_MS);
-            const verified = decideVerify(await readLease(), pair, PARK_REASON.lost);
+            const read = await readLease();
+            const verified = decideVerify(read, pair, PARK_REASON.lost);
             if (!verified.ok) return park(verified.reason);
+            // The chat to reopen after a claim's reload (spec E4): the claim carried `active` over.
+            page.reopen.active = read.lease.active;
             return becomeHolder(pair);
         }
 
@@ -1246,21 +1363,88 @@
         }
 
         /**
-         * Writes `busy` for this page's pair. If the write found the lease at a newer pair of this page's
-         * own (its epoch bump, e.g. onForeground, landed first in the queue), it retries once with that
-         * pair, as the gate's check does; anything else is left to the caller.
+         * Writes `busy` for this page's pair.
          * @param {{ holder: string, epoch: number }} pair The pair the write starts from.
          * @param {boolean} busy The value to write.
          * @returns {Promise<{ outcome: object, pair: object }>} The update's outcome and the pair it used.
          */
-        async function writeBusy(pair, busy) {
-            const outcome = await updateLease(pair, { busy });
+        function writeBusy(pair, busy) {
+            return writeHolderUpdate(pair, { busy });
+        }
+
+        /**
+         * Writes a holder update (`busy` / `active`) for this page's pair. If the write found the lease at
+         * a newer pair of this page's own (its epoch bump, e.g. onForeground, landed first in the queue),
+         * it retries once with that pair, as the gate's check does; anything else is left to the caller.
+         * @param {{ holder: string, epoch: number }} pair The pair the write starts from.
+         * @param {{ busy?: boolean, active?: object|null }} changes Fields to set.
+         * @returns {Promise<{ outcome: object, pair: object }>} The update's outcome and the pair it used.
+         */
+        async function writeHolderUpdate(pair, changes) {
+            const outcome = await updateLease(pair, changes);
             const ownNewerPair = outcome.status === 'parked' && outcome.reason === PARK_REASON.lost
                 && page.phase === PHASE.holder && page.pair !== null
                 && page.pair.holder === pair.holder && page.pair.epoch > pair.epoch;
             if (!ownNewerPair) return { outcome, pair };
             const retryPair = page.pair;
-            return { outcome: await updateLease(retryPair, { busy }), pair: retryPair };
+            return { outcome: await updateLease(retryPair, changes), pair: retryPair };
+        }
+
+        // ---- Open chat, reopen and connection (spec E4, E10) -------------------------------------
+
+        /**
+         * ST's `CHAT_CHANGED` (spec E4): the holder records its open chat as `active` (skipped when
+         * unchanged). Not while a reopen is pending: ST's startup chat changes would overwrite the chat
+         * still to be reopened. A failed write leaves the page holder (spec E3).
+         * @param {object|null} active The open chat (activeFromContext).
+         * @returns {Promise<{ status: string }>} The update's outcome, or `skipped`.
+         */
+        async function recordChat(active) {
+            if (page.phase !== PHASE.holder || page.reopen.pending) return { status: 'skipped' };
+            try {
+                const { outcome } = await writeHolderUpdate(page.pair, { active });
+                if (outcome.status === 'parked') park(outcome.reason);
+                return outcome;
+            } catch (error) {
+                return failed('active', error);
+            }
+        }
+
+        /**
+         * After ST's `APP_READY` (spec E4, E10): what to do in the load right after a claim, once. Waits
+         * for the start decision. Anything but a holder after a claim's reload gets null, and chat changes
+         * are recorded from then on.
+         * @returns {Promise<{ kind: string, active: object|null } | null>} The claim's kind (reconnect only
+         *     after `useHere` / `foreground`) and the chat to reopen, or null.
+         */
+        async function takeReopen() {
+            await start();
+            const { kind, active, pending } = page.reopen;
+            page.reopen.kind = null;
+            if (pending && kind !== null && page.phase === PHASE.holder) return { kind, active };
+            page.reopen.pending = false;
+            return null;
+        }
+
+        /**
+         * The reopen is over (spec E4): chat changes are recorded again, and the chat now open is
+         * recorded. Without one (a skipped reopen: start screen) `active` stays as it was.
+         * @param {object|null} active The chat open now (activeFromContext).
+         * @returns {Promise<{ status: string }>} The update's outcome, or `skipped`.
+         */
+        function finishReopen(active) {
+            page.reopen.pending = false;
+            return active ? recordChat(active) : Promise.resolve({ status: 'skipped' });
+        }
+
+        /**
+         * ST's connection state changed (spec E10): reported as `leaseState.connected`.
+         * @param {boolean} connected Whether ST is connected to a model.
+         * @returns {void}
+         */
+        function setConnected(connected) {
+            page.connected = connected === true;
+            report();
         }
 
         /** Counts a generation as over without writing; the last one forgets the shared write. */
@@ -1465,6 +1649,10 @@
             onForeground,
             beginGeneration,
             endGeneration,
+            recordChat,
+            takeReopen,
+            finishReopen,
+            setConnected,
             /** Whether a failed `busy: false` is still waiting to be written. */
             hasPendingBusyClear: () => state.pendingBusyClear,
             start,
@@ -1487,6 +1675,8 @@
                 claiming: page.claiming,
                 generations: page.generations,
                 busy: page.busy,
+                connected: page.connected,
+                reopenPending: page.reopen.pending,
             }),
         };
     }
@@ -1535,6 +1725,14 @@
         READ_ALLOWLIST,
         CHAT_SAVE_PATHS,
         GENERATION_PATHS,
+        CONNECT_BUTTONS,
+        CONNECT_WAIT_MS,
+        activeFromContext,
+        decideReopen,
+        decideConnect,
+        isConnected,
+        isConnecting,
+        createStHooks,
         READ_WINDOW_MS,
         CSRF_ORDER_MAX_WAIT_MS,
         RELOAD_FALLBACK_MS,
@@ -1835,6 +2033,148 @@
     }
 
     /**
+     * The lease's hooks into ST's context (spec E4, E10): records the open chat, tracks `connected`, and
+     * after a claim's reload reopens the chat and, after Use here / onForeground only, connects once.
+     * Reads a fresh `getContext()` every time (it returns a snapshot). Nothing here can let a request
+     * through: these only call ST's own functions and lease updates.
+     * @param {object} deps
+     * @param {() => object|null} deps.getContext A fresh ST context, or null.
+     * @param {object} deps.lease The page's lease.
+     * @param {(type: string, payload: object) => void} deps.post Reports (`leaseNotice`).
+     * @param {Function} deps.log Logger.
+     * @param {Function} deps.setTimeout Timer for the bounded connect wait.
+     * @param {Function} deps.clearTimeout Clears it.
+     * @param {(selector: string) => { click: Function, classList: object }|null} deps.querySelector Finds
+     *     ST's connect button.
+     * @returns {{ attach: (context: object) => void, afterAppReady: () => Promise<void> }} `attach`
+     *     subscribes to ST's events once its context exists.
+     */
+    function createStHooks({ getContext, lease, post, log, setTimeout, clearTimeout, querySelector }) {
+        const fresh = () => {
+            try {
+                return getContext();
+            } catch (error) {
+                return null;
+            }
+        };
+
+        /** Selects the character, then opens the chat if it isn't the one ST opened (ST's own recent-chat steps). */
+        async function reopenChat(active) {
+            const context = fresh();
+            const decision = decideReopen(active, context && context.characters);
+            if (decision.action === 'none') return;
+            if (decision.action === 'skip') {
+                log('info', 'chat not reopened: start screen', { why: decision.why });
+                return;
+            }
+            await context.selectCharacterById(decision.index);
+            const selected = fresh();
+            // ST skips the switch while a save or a reply runs; openCharacterChat would then change the
+            // wrong character's chat.
+            if (!selected || String(selected.characterId) !== String(decision.index) || activeFromContext(selected) === null
+                || (selected.groupId !== null && selected.groupId !== undefined && selected.groupId !== '')) {
+                log('warn', 'chat not reopened: character not selected');
+                return;
+            }
+            if (selected.chatId !== decision.chatFile) await selected.openCharacterChat(decision.chatFile);
+            log('info', 'chat reopened');
+        }
+
+        /** Resolves true once ST reports a connection, or after CONNECT_WAIT_MS with its status then. */
+        function waitForConnection(context) {
+            return new Promise((resolve) => {
+                const { eventSource, eventTypes } = context;
+                let timer = null;
+                const finish = (connected) => {
+                    clearTimeout(timer);
+                    eventSource.removeListener(eventTypes.ONLINE_STATUS_CHANGED, onChange);
+                    resolve(connected);
+                };
+                const onChange = (status) => {
+                    if (typeof status === 'string' && status !== NO_CONNECTION) finish(true);
+                };
+                eventSource.on(eventTypes.ONLINE_STATUS_CHANGED, onChange);
+                timer = setTimeout(() => finish(isConnected(fresh())), CONNECT_WAIT_MS);
+            });
+        }
+
+        /**
+         * Presses ST's connect button once if not connected and ST isn't already connecting (e.g. its own
+         * Auto-connect); `notConnected` if ST's attempt fails.
+         */
+        async function reconnect(kind) {
+            const context = fresh();
+            const decision = decideConnect(kind, context && context.onlineStatus, context && context.mainApi);
+            if (decision.action === 'none') return;
+            const button = decision.button ? querySelector(decision.button) : null;
+            const connecting = isConnecting(button);
+            if (button && !connecting) button.click();
+            log('info', 'connecting after a takeover', { pressed: button !== null && !connecting, alreadyConnecting: connecting });
+            if (await waitForConnection(context)) return;
+            log('info', 'not connected after a takeover');
+            post('leaseNotice', { kind: 'notConnected' });
+        }
+
+        /** After `APP_READY`: reports `connected`, then reopens and reconnects in the load after a claim. */
+        async function afterAppReady() {
+            lease.setConnected(isConnected(fresh()));
+            const plan = await lease.takeReopen();
+            if (!plan) return;
+            const reopened = reopenChat(plan.active)
+                .catch((error) => log('warn', 'chat not reopened', { error: String(error && error.message) }))
+                .then(() => lease.finishReopen(activeFromContext(fresh())));
+            const connected = reconnect(plan.kind)
+                .catch((error) => log('warn', 'connect failed', { error: String(error && error.message) }));
+            await Promise.all([reopened, connected]);
+        }
+
+        /** Subscribes to ST's events. `APP_READY` fires again for a late listener (ST's auto-fire events). */
+        function attach(context) {
+            const { eventSource, eventTypes } = context;
+            eventSource.on(eventTypes.CHAT_CHANGED, () => { lease.recordChat(activeFromContext(fresh())); });
+            eventSource.on(eventTypes.ONLINE_STATUS_CHANGED, () => { lease.setConnected(isConnected(fresh())); });
+            eventSource.on(eventTypes.APP_READY, () => { afterAppReady(); });
+        }
+
+        return { attach, afterAppReady };
+    }
+
+    /**
+     * Wires the ST hooks once `SillyTavern.getContext` exists: at once on desktop (the extension loads
+     * during ST's startup), else on `load` (the app injects the lease at document start; ST defines its
+     * global before it waits for `load`).
+     */
+    function wireSillyTavern(win, lease, post, log) {
+        const getContext = () => (win.SillyTavern && typeof win.SillyTavern.getContext === 'function'
+            ? win.SillyTavern.getContext() : null);
+        const hooks = createStHooks({
+            getContext,
+            lease,
+            post,
+            log,
+            setTimeout: (fn, ms) => win.setTimeout(fn, ms),
+            clearTimeout: (id) => win.clearTimeout(id),
+            querySelector: (selector) => (win.document && typeof win.document.querySelector === 'function'
+                ? win.document.querySelector(selector) : null),
+        });
+        const attach = () => {
+            let context = null;
+            try {
+                context = getContext();
+            } catch (error) {
+                context = null;
+            }
+            if (!context || !context.eventSource || !context.eventTypes) {
+                log('warn', 'SillyTavern context not found: no reopen, no reconnect');
+                return;
+            }
+            hooks.attach(context);
+        };
+        if (win.SillyTavern) attach();
+        else win.addEventListener('load', attach, { once: true });
+    }
+
+    /**
      * Runs the start decision, reads ST's version, then sends `leaseInfo` (again on every
      * `tt-extension-ready`) (spec E11, E12).
      */
@@ -1859,8 +2199,7 @@
         const lease = createSessionLease({
             fetch: csrf.leaseFetch,
             post: (type, payload) => post(type, type === 'leaseState'
-                // `connected` (spec E10) isn't tracked yet: always false.
-                ? Object.assign({}, payload, { connected: false, origin: win.location.origin })
+                ? Object.assign({}, payload, { origin: win.location.origin })
                 : payload),
             now: () => Date.now(),
             sleep: (ms) => new Promise((resolve) => win.setTimeout(resolve, ms)),
@@ -1905,6 +2244,7 @@
         // The app releases from Kotlin (app spec A5).
         if (source === 'extension') wireDesktopRelease(win, lease, reloadPage);
         startAndReport(win, lease, post, originalFetch, afterOutcome);
+        wireSillyTavern(win, lease, post, log);
         return true;
     }
     if (typeof module !== 'undefined' && module.exports) {
