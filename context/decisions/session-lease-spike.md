@@ -76,23 +76,51 @@ The lease protects every data type tested, between desktop tabs and the app, inc
 
 Which spec section owns each requirement. **E** = `context/specs/ext-0.2-session-lease-spec.md` (this repo), **A** = `context/specs/session-lease-app-spec.md` (TravelingTavern repo). Every requirement has exactly one owner; the other spec links to it.
 
-| # | Section | # | Section | # | Section |
-|---|---|---|---|---|---|
-| 1 | E6 | 15 | E5 | 29 | A3 |
-| 2 | E6 | 16 | E5 | 30 | E4 |
-| 3 | E7 | 17 | E5 | 31 | E6 |
-| 4 | E7 | 18 | E6 | 32 | E13 |
-| 5 | E6 | 19 | E8 | 33 | A2 |
-| 6 | E4 | 20 | split → 36, 37 | 34 | Docs: `coding-standards.md` |
-| 7 | E3 | 21 | E6 | 35 | E4 |
-| 8 | E8 | 22 | E13 (done; measured cost) | 36 | E10 |
-| 9 | E9 | 23 | split → 38, 39 | 37 | A7 |
-| 10 | E4 | 24 | E3 | 38 | A3 |
-| 11 | E6 | 25 | A6 | 39 | A4 |
-| 12 | split → 31–33 | 26 | A2 | 40 | E11 |
-| 13 | split → 34, 35 | 27 | A4 | 41 | E2 |
-| 14 | E14 | 28 | A3 | 42 | E11 |
-|  |  |  |  | 43 | A5 |
-|  |  |  |  | 44 | A5 |
+| Requirement | Owner |
+|---|---|
+| 1 | E6 |
+| 2 | E6 |
+| 3 | E7 |
+| 4 | E7 |
+| 5 | E6 |
+| 6 | E4 |
+| 7 | E3 |
+| 8 | E8 |
+| 9 | E9 |
+| 10 | E4 |
+| 11 | E6 |
+| 12 | split → 31–33 |
+| 13 | split → 34, 35 |
+| 14 | E14 |
+| 15 | E5 |
+| 16 | E5 |
+| 17 | E5 |
+| 18 | E6 |
+| 19 | E8 |
+| 20 | split → 36, 37 |
+| 21 | E6 |
+| 22 | E13 (done; measured cost) |
+| 23 | split → 38, 39 |
+| 24 | E3 |
+| 25 | A6 |
+| 26 | A2 |
+| 27 | A4 |
+| 28 | A3 |
+| 29 | A3 |
+| 30 | E4 |
+| 31 | E6 |
+| 32 | E13 |
+| 33 | A2 |
+| 34 | Docs: `coding-standards.md` |
+| 35 | E4 |
+| 36 | E10 |
+| 37 | A7 |
+| 38 | A3 |
+| 39 | A4 |
+| 40 | E11 |
+| 41 | E2 |
+| 42 | E11 |
+| 43 | A5 |
+| 44 | A5 |
 
 A10 links 14; A5 links 15 and 42; A2 links 40.
