@@ -65,7 +65,7 @@ Branches:
 - **Keep the repo and folder name `TravelingTavern-Extension`.** SillyTavern installs into a folder named after the repo, and the app's install and update calls use that name
 - **Keep the names the app depends on:** `window.__ttSaveGuard` (`version`, `source`, `checkFresh`, `checkChat`), `window.__ttExtension` (`version`, `guardVersion`), the `tt-extension-ready` and `tt-save-guard` events, and the message types and fields in the spec (`saveBlocked`, `staleSettings`, `staleLorebooks`, `chatSaveRefused`, `guardInfo`). If one has to change, say so before changing it, and bump `GUARD_VERSION`
 - **Every endpoint the guard matches is listed in the spec.** When SillyTavern releases a new version, re-check that list before widening `TESTED_ST_VERSIONS`
-- **Never test against real data.** Use a throwaway persona, lorebook, character and chat. Editing the live page's copy of real data erased a persona once
+- **Never test against real data.** Every manual test, spike and cleanup runs on a separate SillyTavern install, never the one in daily use, and no unreleased guard or lease code is ever installed there. Throwaway personas, lorebooks, characters and chats aren't enough: user files and extension data are shared by the whole install. Editing the live page's copy of real data erased a persona once; the session-lease spike and its cleanup overwrote real Memory Books files
 - **The repo is public.** No server addresses, Tailscale IPs, tokens or anything else private in code, tests, docs or commit messages
 
 ## Related Repos

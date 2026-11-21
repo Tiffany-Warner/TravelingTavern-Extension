@@ -59,6 +59,7 @@ The guard depends on SillyTavern's endpoints, module exports and page behavior, 
 - Never guess an endpoint, request / response shape, export, setting or DOM id. Confirm it in SillyTavern's source or the live page (DevTools) first
 - A spec item marked **(verify)** must be confirmed before building on it. Write the finding into the spec's Verified / Notes section with the SillyTavern version checked
 - Never test against real data: throwaway persona, lorebook, character and chat only
+- **Every manual test, spike and cleanup runs on a separate SillyTavern install** (its own folder and data, its own port), never the one in daily use. **No unreleased guard or lease code is ever installed in the SillyTavern in daily use**, not even for a quick check or to clean up through a page. Throwaway characters aren't enough: user files, settings, Quick Replies and extension data (e.g. Memory Books' `stmb-*.json`) are shared by the whole install. The session-lease spike and its cleanup overwrote real user files this way (`context/decisions/session-lease-spike.md`)
 
 ## Code Changes
 
