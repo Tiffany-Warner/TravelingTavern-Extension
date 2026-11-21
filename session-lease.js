@@ -2140,9 +2140,15 @@
     }
 
     /**
-     * Wires the ST hooks once `SillyTavern.getContext` exists: at once on desktop (the extension loads
-     * during ST's startup), else on `load` (the app injects the lease at document start; ST defines its
-     * global before it waits for `load`).
+     * Wires the ST hooks once ST's context can be read: at once on desktop (the extension loads during
+     * ST's startup), else on `load` (the app injects the lease at document start). ST sets its global
+     * before it waits for `load`, but `getContext()` reads module variables declared after that wait,
+     * so it throws until `script.js` resumes; a `load` attach that can't read it retries once, one task
+     * later (spec E10, E15).
+     * @param {object} win The page's window.
+     * @param {object} lease The page's lease.
+     * @param {(type: string, payload: object) => void} post Reports.
+     * @param {Function} log Logger.
      */
     function wireSillyTavern(win, lease, post, log) {
         const getContext = () => (win.SillyTavern && typeof win.SillyTavern.getContext === 'function'
@@ -2157,7 +2163,7 @@
             querySelector: (selector) => (win.document && typeof win.document.querySelector === 'function'
                 ? win.document.querySelector(selector) : null),
         });
-        const attach = () => {
+        const attach = (retry) => {
             let context = null;
             try {
                 context = getContext();
@@ -2165,13 +2171,17 @@
                 context = null;
             }
             if (!context || !context.eventSource || !context.eventTypes) {
+                if (retry) {
+                    win.setTimeout(() => attach(false), 0);
+                    return;
+                }
                 log('warn', 'SillyTavern context not found: no reopen, no reconnect');
                 return;
             }
             hooks.attach(context);
         };
-        if (win.SillyTavern) attach();
-        else win.addEventListener('load', attach, { once: true });
+        if (win.SillyTavern) attach(false);
+        else win.addEventListener('load', () => attach(true), { once: true });
     }
 
     /**

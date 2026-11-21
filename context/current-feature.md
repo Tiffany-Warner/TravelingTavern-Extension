@@ -2,7 +2,7 @@
 
 ## Session Lease `v0.2.0`
 
-**Status:** Slices 1–6 and the `freeze` release fix merged into `dev`; next: tag `v0.2.0-rc.1`
+**Status:** `v0.2.0-rc.1` tagged; `fix/st-context-retry` (ST hooks in the app's page) for `v0.2.0-rc.2`
 **Spec:** `context/specs/ext-0.2-session-lease-spec.md` (E1–E15). App side: TravelingTavern's `session-lease-app-spec.md` (A1–A10)
 **Requirements and evidence:** `context/decisions/session-lease-spike.md` (R1–R44)
 
@@ -28,6 +28,11 @@
 - The TravelingTavern app is blocked on `v0.2.0-rc.1`
 
 ## History
+
+### 2026-11-21 — ST hooks attach in the app's page (for `v0.2.0-rc.2`)
+- In the app's page the lease's `load` listener ran before `script.js` resumed from its `load` wait, so `getContext()` threw a `ReferenceError` (temporal dead zone) and the hooks never attached: no `connected`, no reopen / reconnect after a takeover, no `active` from `CHAT_CHANGED`. Lease safety unaffected; desktop unaffected (the extension loads later)
+- Fix: a `load` attach that can't read the context retries once, one task later (`setTimeout(0)`), then warns as before. Added to the bounded delays (spec E2, E10, `coding-standards.md`); E10, E11 and E15 now state the timing (confirmed in 1.19.1's `script.js`: one top-level `await`)
+- Found by the app's slice 3; unverified: the app (needs a rebuild with this code). `LEASE_VERSION` 1
 
 ### 2026-11-21 — Session lease slice 6: reopen and reconnect after a takeover
 - After a claim's reload the holder reopens the lease's character chat through `SillyTavern.getContext()` (select, then open the chat only if the selection happened); `CHAT_CHANGED` records `active`, not while a reopen is pending. After Use here / onForeground only, a page with `no_connection` presses ST's connect button once (not while ST is already connecting), then `notConnected` after `ONLINE_STATUS_CHANGED` or a 10 s wait; `leaseState.connected` tracks ST
