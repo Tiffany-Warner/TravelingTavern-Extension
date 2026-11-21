@@ -2,7 +2,7 @@
 
 ## Session Lease `v0.2.0`
 
-**Status:** Slices 1–5 and the `freeze` release fix merged into `dev`; slice 6 on `feature/lease-reopen`, ready to merge after review; next: tag `v0.2.0-rc.1`
+**Status:** Slices 1–6 and the `freeze` release fix merged into `dev`; next: tag `v0.2.0-rc.1`
 **Spec:** `context/specs/ext-0.2-session-lease-spec.md` (E1–E14). App side: TravelingTavern's `session-lease-app-spec.md` (A1–A10)
 **Requirements and evidence:** `context/decisions/session-lease-spike.md` (R1–R44)
 
@@ -33,7 +33,7 @@ An idle background holder tab closed without a release marker, twice (likely Chr
 
 ### Order
 
-1. [ ] Slices 1–6, each merged into `dev` (1–5 done; 6 ready to merge)
+1. [x] Slices 1–6, each merged into `dev`
 2. [ ] Tag **`v0.2.0-rc.1`** on `dev`, push the tag
 3. [ ] App: its feature branch pins `v0.2.0-rc.1`; `0.1.20` implemented and tested against it (app spec checklist)
 4. [ ] `chore/release-0.2.0`: full E14 checklist on the test install against the rc; `manifest.json` → `0.2.0`; README; history entry
