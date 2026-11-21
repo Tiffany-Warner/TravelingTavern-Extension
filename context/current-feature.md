@@ -2,7 +2,7 @@
 
 ## Session Lease `v0.2.0`
 
-**Status:** Slices 1–3 merged into `dev`; next: slice 4 (`feature/lease-overlay`)
+**Status:** Slices 1–4 merged into `dev`; next: release on `freeze` (`fix/lease-freeze-release`), then slice 5 (`feature/lease-busy`)
 **Spec:** `context/specs/ext-0.2-session-lease-spec.md` (E1–E14). App side: TravelingTavern's `session-lease-app-spec.md` (A1–A10)
 **Requirements and evidence:** `context/decisions/session-lease-spike.md` (R1–R44)
 
@@ -29,7 +29,7 @@ Each slice: `node --test` passes; manual checks run on the test install only. `L
 
 ### Order
 
-1. [ ] Slices 1–6, each merged into `dev` (1–3 done)
+1. [ ] Slices 1–6, each merged into `dev` (1–4 done)
 2. [ ] Tag **`v0.2.0-rc.1`** on `dev`, push the tag
 3. [ ] App: its feature branch pins `v0.2.0-rc.1`; `0.1.20` implemented and tested against it (app spec checklist)
 4. [ ] `chore/release-0.2.0`: full E14 checklist on the test install against the rc; `manifest.json` → `0.2.0`; README; history entry
@@ -49,6 +49,12 @@ Each slice: `node --test` passes; manual checks run on the test install only. `L
 - The TravelingTavern app is blocked on `v0.2.0-rc.1`
 
 ## History
+
+### 2026-11-21 — Session lease slice 4: overlay and toasts
+- `index.js`: modal `<dialog>` card from `leaseState` (texts per reason, Use here / Reload / spinner), ST theme variables, re-raised over ST popups, Escape can't close it; toasts from `leaseInfo` (untested ST version, once per version via `localStorage`, holder only) and `leaseNotice`, no title
+- Button: accent fill and border from `--SmartThemeQuoteColor`; outranks ST's own `menu_button` focus fill; the card takes the focus after `showModal()` (Chrome ignores `autofocus` on the dialog). Spinner also stops under ST's Reduced Motion
+- Gotchas: an idle background holder tab closed without a release marker, twice (likely frozen, then discarded: no `pagehide`); fix next on `fix/lease-freeze-release`
+- Verified against SillyTavern 1.19.1 in Chrome on the separate test install (dark and light theme, reduced motion, popups before / after parking, two simultaneous Use here, untested-version toast); unverified: hover by mouse, `prefers-reduced-motion` from the OS. `LEASE_VERSION` 1
 
 ### 2026-11-20 — Session lease slice 3: request wrapper and app contract
 - `install()`: `fetch` / XHR / `sendBeacon` wrappers (held, never refused; held fetches reject on their own abort), allowlist confirmed in ST source minus `backgrounds/all`, own CSRF token with ST's `/csrf-token` ordered after it, `window.__ttLease` + `onForeground`, `leaseState` / `leaseInfo`, `tt-lease` with `type`, no install on `/login`; minimal `index.js` loader. Slices 1–2 (files, writes, claim, start decision, release) merged before it
