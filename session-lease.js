@@ -41,6 +41,7 @@
         lostRace: 'lostRace',
         unreadable: 'unreadable',
         unknownFormat: 'unknownFormat',
+        reloadPending: 'reloadPending',
     });
 
     /** Page phases. A page leaves `deciding` once; it becomes holder only through the start decision. */
@@ -59,6 +60,8 @@
     const READ_WINDOW_MS = 2000;
     /** ST's own `/csrf-token` waits at most this long for the lease's token fetch (spec E6). */
     const CSRF_ORDER_MAX_WAIT_MS = 2000;
+    /** A page still alive this long after its reload was asked for parks as `reloadPending` (spec E7). */
+    const RELOAD_FALLBACK_MS = 2500;
 
     /** ST versions this lease was tested against (spec E12). The allowlist is off on any other. */
     const TESTED_ST_VERSIONS = Object.freeze(['1.19.0', '1.19.1']);
@@ -1089,7 +1092,8 @@
          *     The outcome.
          */
         function useHere() {
-            if (page.phase !== PHASE.parked || page.claiming || page.released || page.reason === PARK_REASON.unknownFormat) {
+            const noUseHere = page.reason === PARK_REASON.unknownFormat || page.reason === PARK_REASON.reloadPending;
+            if (page.phase !== PHASE.parked || page.claiming || page.released || noUseHere) {
                 return Promise.resolve({ status: 'ignored' });
             }
             return claim(CLAIM_KIND.useHere);
@@ -1110,6 +1114,18 @@
             page.released = true;
             log('info', 'releasing', { epoch: marker.epoch });
             return uploadFile(RELEASE_FILE, marker, { keepalive: true });
+        }
+
+        /**
+         * The reload after a claim didn't happen (e.g. ST's `beforeunload` cancelled it, spec E7). The page
+         * stays parked, never stuck in `claiming`: it reports `reloadPending`, whose control reloads from a
+         * click. No new claim: the fresh load decides (spec E4).
+         * @returns {void}
+         */
+        function reloadPending() {
+            page.claiming = false;
+            log('warn', 'reload did not happen');
+            park(PARK_REASON.reloadPending);
         }
 
         /**
@@ -1225,7 +1241,7 @@
             try {
                 if (page.phase === PHASE.holder) return await foregroundHolder();
                 const canClaim = page.phase === PHASE.parked && !page.claiming && !page.released
-                    && page.reason !== PARK_REASON.unknownFormat;
+                    && page.reason !== PARK_REASON.unknownFormat && page.reason !== PARK_REASON.reloadPending;
                 return canClaim ? await foregroundParked() : { status: 'ignored' };
             } catch (error) {
                 return failed('foreground', error);
@@ -1281,6 +1297,7 @@
             useHere,
             release,
             restoredFromCache,
+            reloadPending,
             park,
             /** This load's holder id, `<tab id>.<load id>` (`leaseState.pageId`). */
             pageId: () => page.id,
@@ -1341,6 +1358,7 @@
         CHAT_SAVE_PATHS,
         READ_WINDOW_MS,
         CSRF_ORDER_MAX_WAIT_MS,
+        RELOAD_FALLBACK_MS,
     };
 
     // ---- Browser install (thin: wiring only) ---------------------------------------------------
@@ -1509,6 +1527,19 @@
         }
     }
 
+    /**
+     * Reloads the page (spec E7): aborts held chat saves, waits one task so ST's save handlers clear
+     * `isChatSaving` before its `beforeunload` runs, then reloads. A page still alive RELOAD_FALLBACK_MS
+     * later (the reload was cancelled) parks as `reloadPending`, never staying in `claiming`.
+     */
+    function reloadAfterAborts(win, lease, held, log) {
+        log('info', 'reloading', { abortedChatSaves: held.abortChatSaves() });
+        win.setTimeout(() => {
+            win.location.reload();
+            win.setTimeout(() => lease.reloadPending(), RELOAD_FALLBACK_MS);
+        }, 0);
+    }
+
     /** Desktop release on pagehide and the back/forward-cache reload (spec E5). Not in the app's page. */
     function wireDesktopRelease(win, lease, reloadPage) {
         win.addEventListener('pagehide', () => { lease.release(); });
@@ -1573,10 +1604,7 @@
         wrapXhr(win, ctx);
         wrapBeacon(win, ctx);
 
-        const reloadPage = () => {
-            log('info', 'reloading', { abortedChatSaves: held.abortChatSaves() });
-            win.location.reload();
-        };
+        const reloadPage = () => reloadAfterAborts(win, lease, held, log);
         const afterOutcome = (outcome) => {
             if (outcome && outcome.status === 'reload') reloadPage();
         };

@@ -101,7 +101,7 @@ No decision uses a clock time from the files: devices' clocks differ (seconds ap
     - **`busy: false`** → the page stays holder and keeps the pending `busy: false`: it is written with the holder's next lease write or lease check, until it lands, so the file never stays `busy: true` after a reply
 - **Skip unchanged writes:** no write when `busy` and `active` already have the values to be written
 - **A failed `busy: true` is not just metadata:** claimers wouldn't wait for the reply. The generation request is sent only after `busy: true` is written and confirmed (E8). If that write fails after the retry above, the request is **not sent**: the wrapper rejects it with an `AbortError` (as ST's Stop would), so ST ends the generation, and the page reports `leaseNotice` `replyNotStarted` (E11): desktop shows one toast, "Couldn't reach SillyTavern to start the reply. Try again."; the app shows its native notice (A7)
-- One-off delays (this retry, the grace wait in E4, the CSRF ordering wait in E6) are bounded and allowed; no repeating timers (`coding-standards.md`, R34)
+- One-off delays (this retry, the grace wait in E4, the CSRF ordering wait in E6, the reload's one-task wait and 2.5 s fallback in E7) are bounded and allowed; no repeating timers (`coding-standards.md`, R34)
 
 ## 4. Claim and Takeover
 
@@ -164,7 +164,8 @@ Wraps `window.fetch` and `XMLHttpRequest.prototype.open` / `send`. Nothing else 
 
 - **A page becomes writable only through a fresh load that holds the lease** (R4): the start decision (E4) is the only place a page unparks. A page that lost the lease never re-claims by itself; it offers Use here, which claims and reloads
 - Parking is immediate: from that moment every new server-data request is held
-- **Before any reload, abort only held chat saves** (R3): held `/api/chats/save` and `/api/chats/group/save` are rejected with an `AbortError`, so ST's `isChatSaving` clears and its `beforeunload` doesn't block the reload with "Leave site?". These paths are a named constant **(verify per ST version)**
+- **Before any reload, abort only held chat saves** (R3): held `/api/chats/save` and `/api/chats/group/save` are rejected with an `AbortError`, so ST's `isChatSaving` clears and its `beforeunload` doesn't block the reload with "Leave site?". These paths are a named constant (E15). **Then wait one task (`setTimeout(0)`) before reloading:** ST clears the flag in its save handlers, which run only after the rejection; reloading in the same step let `beforeunload` cancel the reload on a page with a user click (seen on the test install, 1.19.1)
+- **A reload that didn't happen** (cancelled by ST's `beforeunload` or the user): a page still alive **2.5 s** after asking for it parks as `reloadPending` (E9), whose **Reload** button calls `location.reload()` from the click. It never stays in `claiming`. No new claim: the fresh load decides (E4)
 - **Held reads are never aborted:** an extension that sees a failed read may write a default file (Memory Books did, through the spike's exemption). They stay pending until the page unloads
 - No held request is ever sent, before or after a reload
 
@@ -209,6 +210,7 @@ Shown by `index.js` from `tt-lease` events of type `leaseState` (E11). **Overlay
 | `lostRace` | Another device took over | It claimed SillyTavern first. | Use here |
 | `unreadable` | Can't reach SillyTavern | Nothing is saved from this page. | Use here |
 | `unknownFormat` | Update needed | Update the TravelingTavern extension to use SillyTavern here. | none |
+| `reloadPending` | Reload needed | Reload this page to finish taking over. | Reload (calls `location.reload()` from the click) |
 
 ## 10. Model Connection After a Takeover Reload
 
@@ -258,7 +260,7 @@ Posted as JSON strings to the app's `TravelingTavern` listener, main frame only,
 | Field | Type | Meaning |
 |---|---|---|
 | `state` | `"holder"` or `"parked"` | |
-| `reason` | string or `null` | `null` when holder. Parked: `"held"` (another page holds the lease), `"lost"` (this page lost it), `"claiming"`, `"waitingForReply"` (claiming, waiting for the other page's `busy` to clear: R29), `"lostRace"` (another page claimed first), `"unreadable"`, `"unknownFormat"` (a lease file in a newer format: this page's own copy is outdated, so in the app's page the app needs an update: E2) |
+| `reason` | string or `null` | `null` when holder. Parked: `"held"` (another page holds the lease), `"lost"` (this page lost it), `"claiming"`, `"waitingForReply"` (claiming, waiting for the other page's `busy` to clear: R29), `"lostRace"` (another page claimed first), `"unreadable"`, `"unknownFormat"` (a lease file in a newer format: this page's own copy is outdated, so in the app's page the app needs an update: E2), `"reloadPending"` (the reload after a claim didn't happen: E7) |
 | `pageId` | string | This load's `holder` id (`<tab id>.<load id>`) |
 | `epoch` | integer or `null` | The epoch this page holds; `null` if it never held the lease in this load |
 | `busy` | boolean | This page is generating a reply |
