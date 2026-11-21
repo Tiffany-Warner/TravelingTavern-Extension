@@ -40,7 +40,8 @@ The repo is public. Nothing identifying my network, devices or accounts in any c
 - No real IPs, machine-specific ports, Tailscale machine / tailnet names, hostnames, usernames, emails, passwords, tokens, API keys
 - No real chat content, lorebook entries, personas, character names from my library, exported settings or backups. Tests and examples use invented data
 - History entries describe the setup instead: "against SillyTavern 1.19.0 in Chrome", "with the TravelingTavern app on the Pixel 8"
-- Placeholders only: `100.64.0.2:8000`, `desktop.tail1234.ts.net`, `user` / `pass`, `Example Character.png`
+- Placeholders only: `192.0.2.1:8000` (documentation-only range `192.0.2.x`), `desktop.tail1234.ts.net`, `user` / `pass`, `Example Character.png`
+- Only exception: user-facing Tailscale examples (`100.64.x.x`) in the app repo's `README.md`, `docs/tailscale-setup.md` and its `connect_url_placeholder` string. Everywhere in this repo (code, tests, specs, decisions) use `192.0.2.x`
 - Check the diff before every commit. If something private is already committed, **stop and tell me**; don't overwrite it (it stays in Git history)
 
 ## Commits
