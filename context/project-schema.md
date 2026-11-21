@@ -56,6 +56,7 @@ Spec: `context/specs/ext-0.2-session-lease-spec.md`. Decision and evidence: `con
 - [ ] App contract: `window.__ttLease`, `leaseState`, `leaseInfo`, one instance per page (E11)
 - [ ] SillyTavern version check (E12)
 - [ ] Unit tests and the manual checklist on the test install (E14)
+- [ ] Tag `v0.2.0-rc.1` on `dev` for the app to build and test against
 - [ ] Release to `main`, tag `v0.2.0`
 
 ---

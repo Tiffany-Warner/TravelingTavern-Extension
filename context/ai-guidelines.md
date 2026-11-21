@@ -26,10 +26,11 @@
 
 ### Releasing to main (when I ask)
 
+0. **Release candidate** (when the app needs the code first): tag `vX.Y.Z-rc.N` on `dev` and push the tag. The app's feature branch pins it; both checklists run against it
 1. `dev` pushed, `node --test` passing, `manifest.json` version and (if lease behavior or the app contract changed) `LEASE_VERSION` bumped
 2. PR `dev` → `main`, titled with the version (e.g. `Release 0.1.0`), listing the history entries included and which manual checks were done (spec checklist, two-page test)
 3. I merge with **Create a merge commit** (not squash or rebase: they make `main` and `dev` drift apart)
-4. Tag the merge commit `vX.Y.Z`. Then the app repo bumps its submodule to that tag
+4. Tag the merge commit `vX.Y.Z`. Then the app repo bumps its submodule to that tag (from the rc tag, before the app's merge)
 
 ## Private Data
 

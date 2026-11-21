@@ -1,33 +1,52 @@
 # Current Feature
 
-## Session-Lease Spike
+## Session Lease `v0.2.0`
 
-**Status:** Spike and specs complete; next: implementing `v0.2.0` from `ext-0.2-session-lease-spec.md`
-**Branch:** `spike/session-lease` (from `dev`; local, throwaway, never merges)
-**Plan:** `context/decisions/direction-change.md` (Spike section). Background: `context/decisions/architecture-assessment.md`
-**Results:** `context/decisions/session-lease-spike.md` (results, incident, verdict, requirements for the spec)
+**Status:** Slice plan approved; slice 1 (`feature/lease-core`) in progress
+**Spec:** `context/specs/ext-0.2-session-lease-spec.md` (E1–E14). App side: TravelingTavern's `session-lease-app-spec.md` (A1–A10)
+**Requirements and evidence:** `context/decisions/session-lease-spike.md` (R1–R44)
 
 ### Goals
 
-Prove or disprove that one active SillyTavern page at a time ("Use here" session lease) is safe and tolerable in real ST. Report each checklist item pass / fail before any spec or app change.
+Build the lease from the spec in slices, each branched from `dev` with its own unit tests and manual checks on the **separate test install**. Tag `v0.2.0-rc.1` for the app, then release `v0.2.0` once both checklists pass.
 
-### Next, in order
+### Before slice 3 merges
 
-1. [x] **Separate SillyTavern test install:** own folder, data and port (1.19.1, fresh data, Memory Books installed, reachable over Tailscale on its own port). Every manual test, spike and cleanup runs there; no unreleased guard or lease code in the install in daily use
-2. [x] **Fixes on `spike/session-lease`, re-checked on the test install** (v4 `dda4e79`, v4.1 `2943387`, v4.2 `a3d6189`; results in `session-lease-spike.md`):
-    - the wrapper exempts nothing (lease I/O uses the original `fetch`)
-    - before a reload, abort only held chat saves; leave held reads pending
-    - bounded lease-write retry: on a failed write, re-read the lease; if holder and epoch are still ours, stay holder and retry after ~100–200 ms; park only if the claim changed or the lease can't be read
-    - added: release marker on tab close (`pagehide`), requests wait for the start decision, a holder restored from the back/forward cache parks and reloads
-3. [x] **Part 2 (the app) on the test install:**
-    - [x] stage 1, the app with no app changes (results in `session-lease-spike.md`): safe, but the app gives no native sign it is parked; phone switch about 6 s
-    - [x] stage 2, app spike code (extension v5 `efa0743`, app `cbd9aac` on the app repo's local `spike/session-lease`, separate `.spike` app, test install only): native parked state, up-front blocking, foreground takeover only when released, release from Kotlin, takeover while generating all pass; a reply in the background stalls (decided: `shortService` foreground service, requirement 25). Document-start holding not built (everything before the extension decides is a read)
-4. [x] **Specs:** `context/specs/ext-0.2-session-lease-spec.md` (reviewed) and the app's `session-lease-app-spec.md` (reviewed); requirement map in `session-lease-spike.md`; `coding-standards.md`, `CLAUDE.md` and `project-schema.md` rewritten for the lease
+- [ ] **Owner: remove the extension from the SillyTavern in daily use** (it's on `dev`). From slice 3 on, `dev` carries lease code, and `dev` must never reach that install. Reinstall from `main` after `v0.2.0`
+
+### Slices
+
+Each slice: `node --test` passes; manual checks run on the test install only. `LEASE_VERSION` stays `1` until the release.
+
+| # | Branch | Spec | Scope | Unit tests | Manual checks (test install) |
+|---|---|---|---|---|---|
+| 1 | `feature/lease-core` | E2, E3 | `session-lease.js` skeleton (IIFE, constants, `LEASE_VERSION`, Node export); `createSessionLease`; reading the files (404 vs unreadable, fields, `format`), released check, pair rule; write queue (one in flight), bounded retry, skip unchanged, pending `busy: false` | `files`, `pair-rule`, `writes` | None |
+| 2 | `feature/lease-claim` | E4 (claim, start decision), E5 (decisions) | Claim (busy wait ≤ 60 s, grace, verify, `lostRace`); start decision (own id → epoch bump, automatic claim once per tab); reopen flag; release marker; back/forward-cache decision | `claim`, `start-decision`, `release` | None |
+| 3 | `feature/lease-wrapper` | E6, E7, E11, E5 wiring | `install()`: `fetch`, XHR and `sendBeacon` wrappers; held requests; wait for the start decision; 2 s read window; allowlist; abort only held chat saves; frozen `window.__ttLease`, one instance per page; `leaseState` / `leaseInfo` / `leaseNotice` and `tt-lease` with `type`; `pagehide` / `pageshow`. Minimal `index.js` (`__ttLeaseSource`, `__ttExtension`, `tt-extension-ready`, loads the lease with a `<script>` element). Helpers copied from `archive/save-guard`. **Research first:** allowlist and chat-save paths in ST 1.19.0 / 1.19.1; WebSockets (R31); where lease writes get ST's CSRF header before ST's context exists (app, document start): check first whether the page can fetch `/csrf-token` itself through the original `fetch`, as Kotlin does (ST returns the session's existing token) | `wrapper`, `messages`, `instance` | Two-page test (stale chat, persona, card, lorebook, settings saves never arrive); Use here and two at once (from the console); holder refresh and duplicated tab; close the holder / an old tab; back/forward cache; no "Leave site?"; Memory Books' held reads; server unreachable; `EPERM` retry; unknown `format` |
+| 4 | `feature/lease-overlay` | E9, E12 | Overlay and its styles in `index.js`, re-raised over ST popups; toasts from `leaseInfo` and `leaseNotice`; `TESTED_ST_VERSIONS`, allowlist off on an untested version | version check (in `wrapper`) | Overlay design, light and dark theme; reduced motion; popup before / after parking; two simultaneous Use here with the buttons; untested-version toast (list narrowed locally, uncommitted) |
+| 5 | `feature/lease-busy` | E8 | Generation requests held until `busy: true` is confirmed; `AbortError` + `leaseNotice` `replyNotStarted` on failure; `busy: false` only when the response is over; overlapping generations. **Research first:** generation endpoints in ST's source | `busy` | Takeover while generating; no model connected: no stuck `busy`; Stop mid-stream clears `busy`; save queued just before a takeover |
+| 6 | `feature/lease-reopen` | E4 (reopen, `active`), E10 | `active` on `CHAT_CHANGED`; reopen after `APP_READY`; reconnect once after Use here only; `connected`; `leaseNotice` `notConnected`. All through `SillyTavern.getContext()`, no module imports (classic script). **Research first:** confirm the context functions and connect buttons (the (verify) items) in ST 1.19.0 / 1.19.1 | `reopen`, `connect` | Use here reopens the same chat (character and group), switch time recorded; deleted character → start screen; reconnect after Use here, not after the automatic claim |
+
+### Order
+
+1. [ ] Slices 1–6, each merged into `dev`
+2. [ ] Tag **`v0.2.0-rc.1`** on `dev`, push the tag
+3. [ ] App: its feature branch pins `v0.2.0-rc.1`; `0.1.20` implemented and tested against it (app spec checklist)
+4. [ ] `chore/release-0.2.0`: full E14 checklist on the test install against the rc; `manifest.json` → `0.2.0`; README; history entry
+5. [ ] Release PR `dev` → `main` (`Release 0.2.0`); owner merges; tag **`v0.2.0`**
+6. [ ] App re-pins its submodule to `v0.2.0` before its merge
+7. [ ] Owner reinstalls the extension in daily use from `main`
+
+### Archives and cleanup (ask before each delete)
+
+- `feature/save-guard`: tagged `archive/save-guard` (pushed). Delete the branch (local and remote) after slice 3 merges
+- `spike/session-lease` (both repos, local): after the release, privacy check, tag `archive/spike-session-lease`, push the tag, delete the branches
 
 ### Notes
 
-- **Per-save guard stopped** 2026-11-20 (owner decision). `ext-0.1-save-guard-spec.md` is marked superseded and kept for its source findings. Slice 1 (core + settings) is on `feature/save-guard` (`wip`, pushed, not merged), kept for the fallback
-- The TravelingTavern app is blocked on the spec
+- **Per-save guard stopped** 2026-11-20 (owner decision). `ext-0.1-save-guard-spec.md` is marked superseded and kept for its source findings
+- Desktop notices: `tt-lease` carries `{ type, ...fields }` (`leaseState`, `leaseInfo`, `leaseNotice`); the app gets `leaseNotice` too (E11, A7)
+- The TravelingTavern app is blocked on `v0.2.0-rc.1`
 
 ## History
 
