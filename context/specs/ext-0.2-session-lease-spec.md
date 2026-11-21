@@ -130,10 +130,18 @@ No decision uses a clock time from the files: devices' clocks differ (seconds ap
 
 Best effort, so closing the holder doesn't cost the next page a click (R15). The app releases differently: app spec A5.
 
-- On **`pagehide` only** (not `beforeunload`, which fires before a "Leave site?" prompt the user may cancel). Only a holder releases; a parked page reloading after a claim never does
+- On **`pagehide`**, and on the Page Lifecycle **`freeze`** event (on `document`). Not on `beforeunload`, which fires before a "Leave site?" prompt the user may cancel. Only a holder releases; a parked page reloading after a claim never does
+- **Why `freeze`:** Chrome freezes idle background tabs and may then discard them (memory saver, low memory). A discarded tab never fires `pagehide`, so `freeze` is the last moment it runs code. The marker's request is sent synchronously from the handler (before any `await`); `keepalive` lets it finish while the page is frozen. Seen twice on the test install before this: an idle background holder closed later left no marker
 - Sent with `fetch(..., { keepalive: true })` through the original `fetch` with ST's request headers (not `sendBeacon`: the upload needs the CSRF header). Body: the release marker (E2) naming this page's exact pair. Never touches the lease
 - **A refreshed holder** finds its own marker matching; the always-bump at start (E4) makes it stop counting (R16)
 - **Back/forward cache** (R17): `pagehide` also fires when a page enters the cache, so a holder restored from it (`pageshow` with `persisted`) has released its claim. It parks at once (holds everything) and reloads; the fresh load decides as in E4
+- **Resumed after a freeze** (`resume` on `document`): the same check as the app's foreground holder path (`onForeground`, A5), **no reload** (Chrome freezes background tabs routinely; a reload would cost the user unsent text). The page that released on `freeze` re-reads the lease and the marker:
+    - Lease still holds its exact pair (no other page claimed): **bump the epoch** to `(itself, epoch + 1)`, invalidating its own marker, wait the grace, verify with the pair rule (E2), and hold again
+    - Pair changed (another page claimed, incl. during the grace): park (`lost`, Use here). Lease unreadable: park (`unreadable`). Unknown format: park (`unknownFormat`). A failed bump: as E3
+    - Requests wait for this check (like the start decision, E6): sent if the page holds again, held otherwise
+    - A page released on `pagehide` ignores `resume`: a back/forward-cache restore fires `resume` and then `pageshow`, and keeps the reload above
+- **Discarded after a freeze:** the marker was written on `freeze`, so the next page claims without a click. Reopening the discarded tab is a fresh load (E4)
+- Desktop only: the app's page releases from Kotlin (app spec A5) and wires neither `pagehide` nor `freeze`
 - **No marker** (browser crash, killed tab, power loss): the next page parks and offers Use here
 
 ## 6. Request Wrapper
@@ -163,6 +171,7 @@ Wraps `window.fetch` and `XMLHttpRequest.prototype.open` / `send`. Nothing else 
 ## 7. Parking and Reloads
 
 - **A page becomes writable only through a fresh load that holds the lease** (R4): the start decision (E4) is the only place a page unparks. A page that lost the lease never re-claims by itself; it offers Use here, which claims and reloads
+- **One exception: resume after a freeze** (E5). A desktop page that released on `freeze` holds again without a fresh load when the lease still holds its exact pair. Safe for the same reason as the app's `onForeground` (A5): an unchanged pair means no other page claimed since, so its copy of the data is still the newest. It still bumps the epoch and verifies (pair rule) first, and requests wait for that check
 - Parking is immediate: from that moment every new server-data request is held
 - **Before any reload, abort only held chat saves** (R3): held `/api/chats/save` and `/api/chats/group/save` are rejected with an `AbortError`, so ST's `isChatSaving` clears and its `beforeunload` doesn't block the reload with "Leave site?". These paths are a named constant (E15). **Then wait one task (`setTimeout(0)`) before reloading:** ST clears the flag in its save handlers, which run only after the rejection; reloading in the same step let `beforeunload` cancel the reload on a page with a user click (seen on the test install, 1.19.1)
 - **A reload that didn't happen** (cancelled by ST's `beforeunload` or the user): a page still alive **2.5 s** after asking for it parks as `reloadPending` (E9), whose **Reload** button calls `location.reload()` from the click. It never stays in `claiming`. No new claim: the fresh load decides (E4)
@@ -343,7 +352,8 @@ The app's own `window.__ttBridge` is not part of this contract.
 | Memory Books writes default files in the holder when a read fails transiently (R32) | A transient server error can reset that extension's files | Outside the lease; report to Memory Books |
 | Switch cost (R22, measured) | Desktop about 3.3 s, phone about 6.6 s from Use here to the reopened chat; about 1.8 s of the phone's is the lease (grace and checks), the rest is ST reloading. The allowlist removes most of the check time | Server plugin (no reload needed) |
 | A holder that doesn't yet know it lost the lease still releases on `pagehide` (it can't read the lease while leaving) | Its marker names its old pair and overwrites the real holder's release marker, so the next page needs **Use here** (one click). Never data: the lease itself is untouched and a stale marker frees nothing. Seen on the test install, 1.19.1 | Server plugin |
-| A holder closed without writing a release marker (seen once on the test install, not reproduced: navigating away and refreshing wrote it every time) | The next page needs **Use here** | Investigate if seen again; release stays best effort |
+| A holder that stops without `pagehide` or `freeze` (a crash, a killed process, a discard that skips freezing first). Idle background tabs frozen and then discarded by Chrome release on `freeze` (E5; before that fix seen twice on the test install) | No marker: the next page needs **Use here** | — (release stays best effort) |
+| Chrome's automatic (proactive) discards may skip the `freeze` event (not tested; the test install's `chrome://discards` allowed only an urgent discard after a manual freeze) | A tab discarded that way still leaves no marker: the next page needs **Use here** | Investigate if seen; release stays best effort |
 | A reply can't move to another device | A takeover waits for the reply (up to 60 s), then reloads | — |
 | A failed `busy: false` on a holder that then goes idle (no further lease write or check to carry it) | One claimer can wait the full 60 s cap | Server plugin, or the holder retrying on its next activity (already the rule, E3) |
 
@@ -359,6 +369,7 @@ The app's own `window.__ttBridge` is not part of this contract.
 - Failed writes after all retries: claim or epoch bump → parks; `active` → stays holder; `busy: false` → stays holder, written with the next lease write or check, and the file ends `busy: false`
 - Wrapper: what counts as server data; holder vs parked; 2 s read window; allowlist on and off (untested ST); held promises never settle; only chat saves aborted before a reload; `sendBeacon` refused while parked
 - `busy`: the generation request is sent only after `busy: true` is confirmed; a failed `busy: true` → request rejected with `AbortError`, never sent, toast; any `/api/backends/*/generate` matches; cleared only when the body is fully read or the stream closes, on error and on cancel, never when the headers arrive; dry runs never set it; overlapping generations
+- Release: marker on `pagehide` and on `freeze` (desktop only); resume after `freeze`: unchanged pair → bump, verify, holder without a reload; pair changed (before or during the grace) → `lost`; unreadable → `unreadable`; requests wait for the check; `resume` after a `pagehide` release is ignored and `pageshow` reloads; a parked page's `freeze` / `resume` do nothing
 - Messages: `leaseState`, `leaseInfo` and `leaseNotice` payloads, to the app and as `tt-lease` with `type`; no CSRF token or ST data in any message
 
 **Manual checklist, on the separate test install only** (never the install in daily use: `ai-guidelines.md`). Throwaway persona, lorebook, character and chat; Memory Books installed. Delete any lease files the spike left before starting.
@@ -371,6 +382,7 @@ The app's own `window.__ttBridge` is not part of this contract.
 - [ ] Holder refresh: stays holder, epoch bumped. Duplicated tab: the older copy parks
 - [ ] Close the holder: the next tab claims without a click. Close an old tab after a takeover: the lease is untouched
 - [ ] Back/forward cache: a restored holder parks and reloads; a write at restore never reaches disk
+- [ ] Freeze, then discard, the holder (`chrome://discards`): a marker for its exact pair each time; the next tab claims without a click; a resumed tab with no claim since holds again at `epoch + 1` without a reload; a resumed tab after another page claimed parks (`lost`)
 - [ ] Held chat save before a reload: no "Leave site?"
 - [ ] Parked tab with Memory Books: held reads stay pending, no default files written
 - [ ] ST popup open before and after parking: overlay on top, Use here works

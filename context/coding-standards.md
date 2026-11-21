@@ -18,7 +18,7 @@ One page writes, every other page holds; fail closed; stay quiet on desktop beyo
 
 ## Timers and Waiting
 
-- **No polling and no repeating timers.** React to events (ST's events, `pagehide` / `pageshow`, requests passing the wrapper)
+- **No polling and no repeating timers.** React to events (ST's events, `pagehide` / `pageshow`, the Page Lifecycle's `freeze` / `resume`, requests passing the wrapper)
 - **Bounded one-off delays are allowed:** the lease-write retry (random 100–200 ms, at most 3 attempts), the claim's grace wait (1 s) ST's `/csrf-token` waiting for the lease's own token fetch (at most 2 s), and the reload's one-task wait (`setTimeout(0)`) and its `reloadPending` fallback (2.5 s). Each has a fixed upper bound and runs once per event
 - **The single named polling exception:** the claim's wait for `busy` re-reads the lease once per second, for at most 60 s, only while a claim is in progress. No other code polls; adding another exception needs the owner's approval and a line here
 
@@ -41,7 +41,7 @@ One page writes, every other page holds; fail closed; stay quiet on desktop beyo
 ## Data Safety
 
 - **Fail closed:** a lease or marker that can't be read, can't be parsed, misses a field or has an unknown `format` → park. Unreadable is never "missing" and never "free"
-- A page becomes writable only through a fresh load that holds the lease
+- A page becomes writable only through a fresh load that holds the lease. One exception: resume after a `freeze` with an unchanged pair, which bumps the epoch and verifies first (spec E5, E7)
 - No clock time from the files is used for a decision
 - Keep no copies of ST data. Messages to the app carry only the fields in spec E11, never ST data or the CSRF token
 

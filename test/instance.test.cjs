@@ -10,7 +10,7 @@ const path = require('node:path');
 const { isLoginPage, LEASE_VERSION } = require('../session-lease.js');
 const manifest = require('../manifest.json');
 const { leaseFile, LEASE, MARKER } = require('./helpers/fake-server.cjs');
-const { createFakeWindow, flush } = require('./helpers/fake-window.cjs');
+const { createFakeWindow, flush, track } = require('./helpers/fake-window.cjs');
 
 test('installs once; a second copy stands down completely', async () => {
     const w = createFakeWindow({ files: { [LEASE]: leaseFile({ holder: 'page-b' }) } });
@@ -90,6 +90,70 @@ test('desktop: a holder restored from the back/forward cache after releasing par
     save.then(() => { settled = true; }, () => { settled = true; });
     await flush();
     assert.strictEqual(settled, false, 'a write at restore is held');
+});
+
+test('desktop releases on freeze (a frozen tab may be discarded without pagehide); the app’s page never does', async () => {
+    const desktop = createFakeWindow({ files: { [LEASE]: leaseFile({ holder: 'page-a' }) }, source: 'extension' });
+    desktop.install();
+    await flush();
+    const state = desktop.events.find((e) => e.type === 'leaseState' && e.state === 'holder');
+    desktop.fireDocument('freeze');
+    await flush();
+    const marker = desktop.harness.markerFile();
+    assert.deepStrictEqual([marker.holder, marker.epoch], [state.pageId, state.epoch], 'the marker names the exact pair');
+
+    const app = createFakeWindow({ files: { [LEASE]: leaseFile({ holder: 'page-a' }) }, app: true });
+    app.install();
+    await flush();
+    app.fireDocument('freeze');
+    await flush();
+    assert.strictEqual(app.server.files.has(MARKER), false);
+});
+
+test('desktop: resume after freeze holds again without a reload; a request at resume waits, then is sent', async () => {
+    const w = createFakeWindow({ files: { [LEASE]: leaseFile({ holder: 'page-a' }) }, source: 'extension' });
+    w.install();
+    await flush();
+    w.fireDocument('freeze');
+    await flush();
+    w.fireDocument('resume');
+    const save = track(w.win.fetch('/api/settings/save', { method: 'POST' }));
+    assert.strictEqual(w.server.stRequests.some((r) => r.url === '/api/settings/save'), false, 'waits for the check');
+    await flush(60);
+    assert.strictEqual(w.win.location.reloads, 0);
+    assert.strictEqual(w.events.filter((e) => e.type === 'leaseState').at(-1).state, 'holder');
+    assert.strictEqual(w.server.stRequests.some((r) => r.url === '/api/settings/save'), true, 'sent once holder again');
+    assert.strictEqual(save.settled(), true);
+});
+
+test('desktop: resume after freeze when another page claimed: parks as lost; the request is held, never sent', async () => {
+    const w = createFakeWindow({ files: { [LEASE]: leaseFile({ holder: 'page-a' }) }, source: 'extension' });
+    w.install();
+    await flush();
+    w.fireDocument('freeze');
+    await flush();
+    w.harness.setFile(LEASE, leaseFile({ holder: 'page-b.load', epoch: 9 }));
+    w.fireDocument('resume');
+    const save = track(w.win.fetch('/api/settings/save', { method: 'POST' }));
+    await flush(60);
+    assert.strictEqual(w.events.filter((e) => e.type === 'leaseState').at(-1).reason, 'lost');
+    assert.strictEqual(w.server.stRequests.some((r) => r.url === '/api/settings/save'), false);
+    assert.strictEqual(save.settled(), false);
+    assert.strictEqual(w.win.location.reloads, 0);
+});
+
+test('desktop: pagehide then freeze writes one marker; a back/forward-cache restore still reloads', async () => {
+    const w = createFakeWindow({ files: { [LEASE]: leaseFile({ holder: 'page-a' }) }, source: 'extension' });
+    w.install();
+    await flush();
+    w.fire('pagehide');
+    w.fireDocument('freeze');
+    await flush();
+    assert.strictEqual(w.harness.uploads.filter((u) => u.name === MARKER).length, 1);
+    w.fireDocument('resume');
+    w.fire('pageshow', { persisted: true });
+    await flush();
+    assert.strictEqual(w.win.location.reloads, 1);
 });
 
 test('an automatic claim at start reloads the page', async () => {

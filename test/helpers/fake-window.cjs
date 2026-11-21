@@ -29,6 +29,7 @@ class FakeCustomEvent {
 function createFakeWindow({ harness, files, pathname = '/', source, storage = { 'tt-lease-tab-id': 'page-a' }, app = false, frame = false } = {}) {
     const h = harness || createHarness({ files });
     const listeners = new Map();
+    const docListeners = new Map();
     const events = [];
     const appMessages = [];
     const beacons = [];
@@ -70,6 +71,12 @@ function createFakeWindow({ harness, files, pathname = '/', source, storage = { 
             return true;
         },
     };
+    win.document = {
+        addEventListener(type, fn) {
+            if (!docListeners.has(type)) docListeners.set(type, []);
+            docListeners.get(type).push(fn);
+        },
+    };
     win.top = frame ? {} : win;
     if (source) win.__ttLeaseSource = source;
     if (app) win.TravelingTavern = { postMessage: (text) => appMessages.push(JSON.parse(text)) };
@@ -85,6 +92,10 @@ function createFakeWindow({ harness, files, pathname = '/', source, storage = { 
         install: () => install(win),
         /** Fires a window event (pagehide, pageshow, tt-extension-ready). */
         fire: (type, options) => win.dispatchEvent(new FakeCustomEvent(type, options)),
+        /** Fires a document event (the Page Lifecycle's freeze and resume). */
+        fireDocument: (type) => {
+            for (const fn of docListeners.get(type) || []) fn(new FakeCustomEvent(type));
+        },
     };
 }
 
