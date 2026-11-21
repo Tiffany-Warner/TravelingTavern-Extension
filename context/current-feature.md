@@ -2,7 +2,7 @@
 
 ## Session Lease `v0.2.0`
 
-**Status:** Slices 1–2 merged into `dev`; slice 3 (`feature/lease-wrapper`) built, unit tests pass; manual checks on the test install next
+**Status:** Slices 1–3 merged into `dev`; next: slice 4 (`feature/lease-overlay`)
 **Spec:** `context/specs/ext-0.2-session-lease-spec.md` (E1–E14). App side: TravelingTavern's `session-lease-app-spec.md` (A1–A10)
 **Requirements and evidence:** `context/decisions/session-lease-spike.md` (R1–R44)
 
@@ -12,7 +12,7 @@ Build the lease from the spec in slices, each branched from `dev` with its own u
 
 ### Before slice 3 merges
 
-- [ ] **Owner: remove the extension from the SillyTavern in daily use** (it's on `dev`). From slice 3 on, `dev` carries lease code, and `dev` must never reach that install. Reinstall from `main` after `v0.2.0`
+- [x] **Owner: remove the extension from the SillyTavern in daily use** (done 2026-11-20) (it's on `dev`). From slice 3 on, `dev` carries lease code, and `dev` must never reach that install. Reinstall from `main` after `v0.2.0`
 
 ### Slices
 
@@ -29,7 +29,7 @@ Each slice: `node --test` passes; manual checks run on the test install only. `L
 
 ### Order
 
-1. [ ] Slices 1–6, each merged into `dev`
+1. [ ] Slices 1–6, each merged into `dev` (1–3 done)
 2. [ ] Tag **`v0.2.0-rc.1`** on `dev`, push the tag
 3. [ ] App: its feature branch pins `v0.2.0-rc.1`; `0.1.20` implemented and tested against it (app spec checklist)
 4. [ ] `chore/release-0.2.0`: full E14 checklist on the test install against the rc; `manifest.json` → `0.2.0`; README; history entry
@@ -39,7 +39,7 @@ Each slice: `node --test` passes; manual checks run on the test install only. `L
 
 ### Archives and cleanup (ask before each delete)
 
-- `feature/save-guard`: tagged `archive/save-guard` (pushed). Delete the branch (local and remote) after slice 3 merges
+- `feature/save-guard`: tagged `archive/save-guard` (pushed); branch deleted after slice 3 (helpers ported or not needed)
 - `spike/session-lease` (both repos, local): after the release, privacy check, tag `archive/spike-session-lease`, push the tag, delete the branches
 
 ### Notes
@@ -49,6 +49,12 @@ Each slice: `node --test` passes; manual checks run on the test install only. `L
 - The TravelingTavern app is blocked on `v0.2.0-rc.1`
 
 ## History
+
+### 2026-11-20 — Session lease slice 3: request wrapper and app contract
+- `install()`: `fetch` / XHR / `sendBeacon` wrappers (held, never refused; held fetches reject on their own abort), allowlist confirmed in ST source minus `backgrounds/all`, own CSRF token with ST's `/csrf-token` ordered after it, `window.__ttLease` + `onForeground`, `leaseState` / `leaseInfo`, `tt-lease` with `type`, no install on `/login`; minimal `index.js` loader. Slices 1–2 (files, writes, claim, start decision, release) merged before it
+- Fixed after the test-install run: the takeover reload waits one task after aborting chat saves (`beforeunload` cancelled it on a clicked page), `reloadPending` if it still doesn't happen; lease checks read through the write queue
+- Gotchas: a stale holder's `pagehide` marker can overwrite the real holder's (E13, costs a click); ST's quick-reply hook times out in parked pages; `EPERM` retried as designed
+- Verified against SillyTavern 1.19.1 in Chrome on the separate test install (full slice 3 checklist incl. forced `EPERM`); unverified: a write at the exact back/forward-cache restore, Chrome's real Duplicate (simulated), the app. `LEASE_VERSION` 1
 
 <!-- One entry per completed feature / fix, 3–5 lines max: what changed, cause/key decisions, gotchas, what's unverified, version. No verification logs or test counts. Nothing private. -->
 
