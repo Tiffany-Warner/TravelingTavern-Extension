@@ -1,5 +1,7 @@
 # TravelingTavern Extension
 
+> **The per-save guard described below is stopped** (2026-11-20) in favor of a session lease, one active SillyTavern page at a time: see `context/decisions/direction-change.md`. This file is revised with the new spec; its Hard Rules still apply.
+
 A SillyTavern extension that stops any SillyTavern page from saving an old copy of a file over a newer one. It is the desktop half of the [TravelingTavern](https://github.com/Tiffany-Warner/TravelingTavern) Android app's data protection: the app guards its own page, and this extension loads the same guard into every other SillyTavern page (desktop browser tabs).
 
 SillyTavern pages read settings, lorebooks, chats and character cards once, then save the **whole file** from their own copy. A page that has been open for a while erases whatever another device saved since. The guard checks every such save first and refuses it when the server's file has changed.
