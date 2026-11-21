@@ -33,6 +33,18 @@ function createHarness({ files = {}, storage = { [lease.STORAGE_KEYS.tabId]: 'pa
         beforeUpload: null,
         /** Called on every sleep with the delay; may change server state (time passing elsewhere). */
         onSleep: null,
+        /** When set, uploads need this X-CSRF-Token header (else 403), and /csrf-token answers it. */
+        csrfToken: null,
+        /** Awaited before /csrf-token answers (a slow token fetch). */
+        tokenDelay: null,
+        /** /csrf-token requests seen. */
+        tokenRequests: 0,
+        /** ST's version, answered by /version. */
+        stVersion: '1.19.1',
+        /** Every request that isn't the lease's (ST's own), in order. */
+        stRequests: [],
+        /** Reads of the lease file. */
+        leaseReads: 0,
     };
     const uploads = [];
     const sleeps = [];
@@ -45,11 +57,24 @@ function createHarness({ files = {}, storage = { [lease.STORAGE_KEYS.tabId]: 'pa
         if (server.offline) throw new TypeError('Failed to fetch');
         const method = String(init.method || 'GET').toUpperCase();
         if (method === 'GET' && url.startsWith(lease.USER_FILES_PATH)) return answerRead(url.slice(lease.USER_FILES_PATH.length));
-        if (method === 'POST' && url === lease.UPLOAD_PATH) return answerUpload(JSON.parse(init.body), init);
-        return new Response('not found', { status: 404 });
+        if (method === 'POST' && url === lease.UPLOAD_PATH) {
+            if (server.csrfToken !== null && new Headers(init.headers).get('X-CSRF-Token') !== server.csrfToken) {
+                return new Response('Invalid CSRF token', { status: 403 });
+            }
+            return answerUpload(JSON.parse(init.body), init);
+        }
+        if (method === 'GET' && url === '/csrf-token') {
+            server.tokenRequests++;
+            if (server.tokenDelay) await server.tokenDelay;
+            return Response.json({ token: server.csrfToken || 'disabled' });
+        }
+        if (method === 'GET' && url === '/version') return Response.json({ agent: 'x', pkgVersion: server.stVersion });
+        server.stRequests.push({ url: String(url), method, headers: new Headers(init.headers) });
+        return Response.json({ ok: true });
     }
 
     function answerRead(name) {
+        if (name === lease.LEASE_FILE) server.leaseReads++;
         if (name === lease.LEASE_FILE && server.failLeaseReads > 0) {
             server.failLeaseReads--;
             return new Response('error', { status: 500 });
@@ -117,6 +142,10 @@ function createHarness({ files = {}, storage = { [lease.STORAGE_KEYS.tabId]: 'pa
         posts: first.posts,
         storage: first.storage,
         newPage,
+        /** The fake server's fetch (a page's original fetch). */
+        fetch: fakeFetch,
+        /** Moves the pages' clock forward without a sleep. */
+        advance: (ms) => { clock += ms; },
         server,
         uploads,
         sleeps,
@@ -180,6 +209,7 @@ function markerFile(fields = {}) {
 
 module.exports = {
     createHarness,
+    fakeStorage,
     leaseFile,
     markerFile,
     LEASE: lease.LEASE_FILE,
