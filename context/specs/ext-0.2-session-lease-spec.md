@@ -1,6 +1,6 @@
 # TravelingTavern Extension `v0.2.0` — Session Lease
 
-> **Draft for review.** Sections 2 and 11 (shared contract) reviewed and committed; sections 1 and 3–14 awaiting review. Items marked **(verify)** must be confirmed in SillyTavern's source before they're built on.
+> **Reviewed** (2026-11-20). Items marked **(verify)** must be confirmed in SillyTavern's source before they're built on.
 
 Replaces `ext-0.1-save-guard-spec.md` (superseded). Requirements: `context/decisions/session-lease-spike.md` (cited as **R1–R44**). Plan and requirement map: `session-lease-outline.md`. App side: the TravelingTavern repo's `session-lease-app-spec.md`, which references this spec for every shared definition and never restates it.
 
@@ -94,9 +94,13 @@ No decision uses a clock time from the files: devices' clocks differ (seconds ap
 
 - **One write in flight at a time** (R24): claims, epoch bumps and `busy` / `active` updates go through one queue in the page. Otherwise an update that read the lease before an epoch bump can write the old epoch back
 - **Every update re-reads first** and writes only if the lease still holds this page's pair (E2). Pair changed → park (`lost`); unreadable → park (`unreadable`)
-- **Bounded retry** (R7): a failed write (e.g. Windows `EPERM`, answered as 500) is retried after a random 100–200 ms, at most 3 attempts in total, re-reading before each. The page parks only if the pair changed or the lease can't be read. A write that still fails after 3 attempts leaves the page holder and is logged
+- **Bounded retry** (R7): a failed write (e.g. Windows `EPERM`, answered as 500) is retried after a random 100–200 ms, at most 3 attempts in total, re-reading before each. The page parks at once if the pair changed or the lease can't be read. When all 3 attempts fail:
+    - **claim or epoch bump** → the page isn't holder: it parks (`unreadable`)
+    - **`active`** → the page stays holder; logged (only reopening the chat after a takeover is affected)
+    - **`busy: true`** → see below
+    - **`busy: false`** → the page stays holder and keeps the pending `busy: false`: it is written with the holder's next lease write or lease check, until it lands, so the file never stays `busy: true` after a reply
 - **Skip unchanged writes:** no write when `busy` and `active` already have the values to be written
-- **A failed `busy: true` is not just metadata:** claimers wouldn't wait for this reply. **Only after the retry above has failed**, the page stops the generation with ST's own stop and shows one toast: "Couldn't reach SillyTavern to start the reply. Try again."
+- **A failed `busy: true` is not just metadata:** claimers wouldn't wait for the reply. The generation request is sent only after `busy: true` is written and confirmed (E8). If that write fails after the retry above, the request is **not sent**: the wrapper rejects it with an `AbortError` (as ST's Stop would), so ST ends the generation, and one toast says "Couldn't reach SillyTavern to start the reply. Try again."
 - One-off delays (this retry, the grace wait in E4) are bounded and allowed; no repeating timers (`coding-standards.md`, R34)
 
 ## 4. Claim and Takeover
@@ -104,7 +108,7 @@ No decision uses a clock time from the files: devices' clocks differ (seconds ap
 **Claim** (Use here, an automatic claim at start, or the app's `useHere()` / `onForeground()`):
 
 1. Read the lease and the marker. Unknown format → park (`unknownFormat`) and stop
-2. **Wait for `busy`** (R6, R35) unless the lease is released (its `busy` is stale) or there is no lease: re-read once per second for at most 60 s while the lease is `busy`, reporting `waitingForReply`. This is the one named exception to "no polling" (`coding-standards.md`): bounded, only during a claim, ends at 60 s. A `busy` that can never clear (R19) is prevented by E8, not waited out
+2. **Wait for `busy`** (R6, R35) unless the lease is released (its `busy` is stale) or there is no lease: re-read once per second for at most 60 s while the lease is `busy`, reporting `waitingForReply`. During the wait, a lease whose pair changed (another page claimed) parks this page (`lostRace`); a lease that becomes released ends the wait and the claim continues. This is the one named exception to "no polling" (`coding-standards.md`): bounded, only during a claim, ends at 60 s. A `busy` that can never clear (R19) is prevented by E8, not waited out
 3. Write `{ format, holder: own id, epoch: lease.epoch + 1 (1 if no lease), claimedAt, busy: false, active: carried over }`
 4. **Grace:** wait 1 s, so a write the old holder already sent lands before this page loads
 5. **Verify:** re-read; continue only if the lease holds this page's pair, else park (`lostRace`). Two pages claiming at once end with exactly one holder: the last write wins, the other's verify fails
@@ -112,12 +116,12 @@ No decision uses a clock time from the files: devices' clocks differ (seconds ap
 
 **Start decision** (every page load; requests wait for it, E6):
 
-- Lease names this page's id: a refresh, or a duplicated tab that copied `sessionStorage`. **Always bump the epoch** to `(own id, epoch + 1)` and verify (pair rule, E2) before becoming holder. The newest load with that id wins; an older page with the same id fails its next pair check and parks
+- Lease names this page's id: a refresh, or a duplicated tab that copied `sessionStorage`. **Always bump the epoch** to `(own id, epoch + 1)`, with `busy: false` (no reply can be running in a fresh load), and verify (pair rule, E2) before becoming holder. The newest load with that id wins; an older page with the same id fails its next pair check and parks
 - **A duplicated tab** bumps the epoch like a refresh, so it takes over from the original without a click, and the original parks at its next write. This is intended: it prevents two holders with the same page id
 - No lease, or the lease is released → **automatic claim** (steps 1–6, no click), at most once per tab between successful loads (a `sessionStorage` mark prevents a reload loop)
 - Otherwise → parked (`held`). Lease or marker unreadable → parked (`unreadable`)
 
-**Reopen the chat** (R10, R30): after a reload that follows any claim (Use here or automatic), once ST fires `APP_READY` and the page is holder, read `active` and open it with ST's context functions: group → `openGroupChat(groupId, chatFile)`; character → `selectCharacterById(index of avatar)`, then `openCharacterChat(chatFile)` if that chat isn't already open. A character or group that no longer exists → stay on ST's start screen (logged). While the reopen flag is set, ST's startup `CHAT_CHANGED` with no chat doesn't overwrite `active`.
+**Reopen the chat** (R10, R30): after a reload that follows any claim (Use here or automatic), once ST fires `APP_READY` and the page is holder, read `active` and open it with ST's context functions: group → `openGroupChat(groupId, chatFile)` **(verify)**; character → `selectCharacterById(index of avatar)` **(verify)**, then `openCharacterChat(chatFile)` **(verify)** if that chat isn't already open. A character or group that no longer exists → stay on ST's start screen (logged). While the reopen flag is set, ST's startup `CHAT_CHANGED` with no chat doesn't overwrite `active`.
 
 **Recording the open chat:** on `CHAT_CHANGED` the holder writes `active` (E3; skipped when unchanged).
 
@@ -164,8 +168,9 @@ Wraps `window.fetch` and `XMLHttpRequest.prototype.open` / `send`. Nothing else 
 
 `busy` tells claimers the holder is generating a reply (R8, R19).
 
-- **Tied to the generation request itself,** not to ST's `GENERATION_STARTED` event, which also fires for dry runs and, when a generation fails before it starts, has no end event. The wrapper sets `busy: true` when it sends a request to a generation endpoint and `busy: false` only when that response is over: the body fully read or the stream closed, an error, or the read cancelled (Stop). **Never when the headers arrive:** a streaming reply continues long after them. Dry runs and generations that fail before sending never set it
-- Generation endpoints, a named constant **(verify per ST version)**: `/api/backends/chat-completions/generate`, `/api/backends/text-completions/generate`, `/api/backends/kobold/generate`, `/api/novelai/generate`, `/api/horde/generate-text`
+- **Tied to the generation request itself,** not to ST's `GENERATION_STARTED` event, which also fires for dry runs and, when a generation fails before it starts, has no end event. The wrapper holds a request to a generation endpoint until `busy: true` is written and confirmed (E3), then sends it; it writes `busy: false` only when that response is over: the body fully read or the stream closed, an error, or the read cancelled (Stop). **Never when the headers arrive:** a streaming reply continues long after them. Dry runs and generations that fail before sending never set it
+- Generation endpoints, a named constant **(verify per ST version)**: any `/api/backends/*/generate` (so a new backend still sets `busy`; today `chat-completions`, `text-completions`, `kobold`), plus `/api/novelai/generate` and `/api/horde/generate-text`
+- If `busy: true` can't be written after the retries, the request isn't sent (E3)
 - Several generation requests at once (e.g. an extension's background summary during a reply): `busy` stays `true` until the last one finishes
 - Written through the lease-write queue (E3); a failed `busy: true` → E3
 - A released claim's `busy` is ignored (E5). The wait itself is bounded at 60 s (E4)
@@ -205,7 +210,7 @@ Shown by `index.js` from `tt-lease` events (E11). **Overlay only, no toast** for
 
 ST connects to the model at startup only when its **Auto-connect** option is on (`power_user.auto_connect`, off by default). After a takeover reload the user would otherwise land in their chat unable to generate (R36; seen on desktop and in the app).
 
-- After a reload that follows a claim, once `APP_READY` has fired and the page is holder: if ST's `onlineStatus` is `no_connection`, the page presses ST's own connect button for the selected API, once: the same buttons ST's auto-connect presses (`#api_button`, `#api_button_novel`, `#api_button_textgenerationwebui`, `#api_button_openai`, chosen by `main_api`) **(verify)**
+- After a reload that follows **Use here** or the app's `onForeground()` claim (not the automatic claim at start: that page was never connected in this session, and ST's own Auto-connect decides), once `APP_READY` has fired and the page is holder: if ST's `onlineStatus` is `no_connection`, the page presses ST's own connect button for the selected API, once: the same buttons ST's auto-connect presses (`#api_button`, `#api_button_novel`, `#api_button_textgenerationwebui`, `#api_button_openai`, chosen by `main_api`) **(verify)**
 - Still not connected after ST's own attempt: desktop shows one toast, "Not connected to a model. Connect in API Connections."; the app shows its native notice (A7), from a `connected` field in `leaseState` (additive, no `format` bump)
 - Never changes ST's settings (doesn't turn Auto-connect on)
 
@@ -322,6 +327,7 @@ The app's own `window.__ttBridge` is not part of this contract.
 | Memory Books writes default files in the holder when a read fails transiently (R32) | A transient server error can reset that extension's files | Outside the lease; report to Memory Books |
 | Switch cost (R22, measured) | Desktop about 3.3 s, phone about 6.6 s from Use here to the reopened chat; about 1.8 s of the phone's is the lease (grace and checks), the rest is ST reloading. The allowlist removes most of the check time | Server plugin (no reload needed) |
 | A reply can't move to another device | A takeover waits for the reply (up to 60 s), then reloads | — |
+| A failed `busy: false` on a holder that then goes idle (no further lease write or check to carry it) | One claimer can wait the full 60 s cap | Server plugin, or the holder retrying on its next activity (already the rule, E3) |
 
 ## 14. Tests
 
@@ -329,11 +335,12 @@ The app's own `window.__ttBridge` is not part of this contract.
 
 - Files: 404 vs unreadable; malformed JSON, missing fields; unknown fields ignored; unknown or missing `format` → park; released only on an exact pair match with known formats; a stale marker means nothing
 - Pair rule: claim verify; epoch-bump verify; a bump and a claim writing the same epoch
-- Claim: busy wait bounded at 60 s and skipped when released; grace; lost race; reopen flag; automatic claim at most once per tab
-- Start decision: own id → bump; requests wait for the decision; duplicated tab (same id) → the older page parks on its next check
-- Writes: one in flight; re-read before each; 3 attempts 100–200 ms apart; park only on a pair change or unreadable; unchanged writes skipped; failed `busy: true`
+- Claim: busy wait bounded at 60 s and skipped when released; during the wait a changed pair → `lostRace`, a release → the wait ends and the claim continues; grace; lost race; reopen flag; automatic claim at most once per tab
+- Start decision: own id → bump with `busy: false` (even if the file said `busy: true`); requests wait for the decision; duplicated tab (same id) → the older page parks on its next check
+- Writes: one in flight; re-read before each; 3 attempts 100–200 ms apart; park at once on a pair change or unreadable; unchanged writes skipped
+- Failed writes after all retries: claim or epoch bump → parks; `active` → stays holder; `busy: false` → stays holder, written with the next lease write or check, and the file ends `busy: false`
 - Wrapper: what counts as server data; holder vs parked; 2 s read window; allowlist on and off (untested ST); held promises never settle; only chat saves aborted before a reload; `sendBeacon` refused while parked
-- `busy`: set by a generation request; cleared only when the body is fully read or the stream closes, on error and on cancel, never when the headers arrive; dry runs never set it; overlapping generations
+- `busy`: the generation request is sent only after `busy: true` is confirmed; a failed `busy: true` → request rejected with `AbortError`, never sent, toast; any `/api/backends/*/generate` matches; cleared only when the body is fully read or the stream closes, on error and on cancel, never when the headers arrive; dry runs never set it; overlapping generations
 - Messages: `leaseState` and `leaseInfo` payloads; no CSRF token or ST data in any message
 
 **Manual checklist, on the separate test install only** (never the install in daily use: `ai-guidelines.md`). Throwaway persona, lorebook, character and chat; Memory Books installed. Delete any lease files the spike left before starting.
@@ -354,5 +361,5 @@ The app's own `window.__ttBridge` is not part of this contract.
 - [ ] Lease write `EPERM` (Windows): retried, no false park
 - [ ] Unknown `format` in the lease file: page parks with the update message, writes nothing
 - [ ] Untested ST version: toast once, every request checked
-- [ ] Model connection restored after a takeover reload
+- [ ] Model connection restored after a Use here reload; not pressed after an automatic claim at start
 - [ ] The app's checks: app spec checklist
