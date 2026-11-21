@@ -2,7 +2,7 @@
 
 ## Session Lease `v0.2.0`
 
-**Status:** Slices 1–4 and the `freeze` release fix merged into `dev`; next: slice 5 (`feature/lease-busy`)
+**Status:** Slices 1–4 and the `freeze` release fix merged into `dev`; slice 5 (`feature/lease-busy`) in progress
 **Spec:** `context/specs/ext-0.2-session-lease-spec.md` (E1–E14). App side: TravelingTavern's `session-lease-app-spec.md` (A1–A10)
 **Requirements and evidence:** `context/decisions/session-lease-spike.md` (R1–R44)
 

@@ -97,6 +97,12 @@
     /** Chat saves: the only held requests aborted before a reload (spec E7, E15). */
     const CHAT_SAVE_PATHS = Object.freeze(['/api/chats/save', '/api/chats/group/save']);
 
+    /**
+     * Generation endpoints (spec E8, E15): sent only after `busy: true` is confirmed. Confirmed in ST
+     * 1.19.0 and 1.19.1. `*` is one path segment, so a new backend still sets `busy`.
+     */
+    const GENERATION_PATHS = Object.freeze(['/api/backends/*/generate', '/api/novelai/generate', '/api/horde/generate-text']);
+
     /** Messages (spec E11). */
     const MESSAGE_VERSION = 1;
     const APP_LISTENER = 'TravelingTavern';
@@ -509,6 +515,11 @@
         return CHAT_SAVE_PATHS.some((pattern) => matchesEndpoint(path, pattern));
     }
 
+    /** Whether a request is a generation (spec E8): a POST to a generation endpoint. */
+    function isGeneration(path, method) {
+        return method === 'POST' && GENERATION_PATHS.some((pattern) => matchesEndpoint(path, pattern));
+    }
+
     /** Whether a request is ST's own CSRF token request (spec E6, ordering). */
     function isCsrfTokenRequest(path, method) {
         return method === 'GET' && matchesEndpoint(path, CSRF_TOKEN_PATH);
@@ -897,6 +908,12 @@
             releasedPair: null,
             /** The check after `resume` (spec E5); requests wait for it. */
             resumePromise: null,
+            /** Generation requests in flight (spec E8); `busy` stays true until the last one is over. */
+            generations: 0,
+            /** The `busy: true` write the generations in flight share. */
+            busyWrite: null,
+            /** `busy: true` is confirmed in the lease (reported as `leaseState.busy`). */
+            busy: false,
             startPromise: null,
             lastReport: '',
             /** When a lease read last confirmed this holder's pair (`now()` ms). */
@@ -913,7 +930,7 @@
 
         /**
          * Reports `leaseState` when it changed (spec E11). Nothing is reported before the start decision.
-         * `busy` (this page is generating, spec E8) isn't tracked yet: always false.
+         * `busy`: this page is generating, with `busy: true` confirmed in the lease (spec E8).
          * @returns {void}
          */
         function report() {
@@ -924,7 +941,7 @@
                 reason: holder ? null : page.reason,
                 pageId: page.id,
                 epoch: page.heldEpoch,
-                busy: false,
+                busy: page.busy,
             };
             const key = JSON.stringify(payload);
             if (key === page.lastReport) return;
@@ -1187,6 +1204,69 @@
             return becomeHolder(next);
         }
 
+        // ---- busy (spec E8) ----------------------------------------------------------------------
+
+        /**
+         * Before a generation request is sent (spec E3, E8): writes `busy: true` (shared by overlapping
+         * generations) and waits until it's confirmed. Call only for a request the gate let through.
+         * @returns {Promise<{ status: 'send' } | { status: 'hold' } | { status: 'abort' }>} Send it (then
+         *     call endGeneration once its response is over); hold it (the page parked); or reject it with
+         *     an `AbortError` (`busy: true` couldn't be written: `leaseNotice` `replyNotStarted`).
+         */
+        async function beginGeneration() {
+            if (page.phase !== PHASE.holder) return { status: 'hold' };
+            const pair = page.pair;
+            page.generations++;
+            if (!page.busyWrite) page.busyWrite = updateLease(pair, { busy: true });
+            let outcome;
+            try {
+                outcome = await page.busyWrite;
+            } catch (error) {
+                outcome = { status: 'parked', reason: PARK_REASON.unreadable };
+            }
+            const confirmed = outcome.status === 'written' || outcome.status === 'unchanged';
+            if (confirmed && stillHolds(pair)) {
+                page.busy = true;
+                page.verifiedAt = now();
+                report();
+                return { status: 'send' };
+            }
+            dropGeneration();
+            if (outcome.status === 'parked') {
+                park(outcome.reason);
+                return { status: 'hold' };
+            }
+            if (!confirmed) {
+                log('warn', 'busy true not written: reply not started');
+                post('leaseNotice', { kind: 'replyNotStarted' });
+                return { status: 'abort' };
+            }
+            return { status: 'hold' };
+        }
+
+        /** Counts a generation as over without writing; the last one forgets the shared write. */
+        function dropGeneration() {
+            page.generations = Math.max(0, page.generations - 1);
+            if (page.generations === 0) page.busyWrite = null;
+        }
+
+        /**
+         * A generation's response is over (spec E8): body fully read, stream closed, an error or a
+         * cancel. The last one writes `busy: false` (a failed write stays pending, spec E3). A page that
+         * is no longer holder writes nothing.
+         * @returns {Promise<void>}
+         */
+        async function endGeneration() {
+            if (page.generations === 0) return;
+            dropGeneration();
+            if (page.generations > 0) return;
+            page.busy = false;
+            report();
+            if (page.phase !== PHASE.holder) return;
+            const outcome = await updateLease(page.pair, { busy: false });
+            if (outcome.status === 'parked') park(outcome.reason);
+        }
+
         // ---- Requests and the app's hooks (spec E6, E11) ---------------------------------------
 
         /** Records ST's version (spec E12); the allowlist is on only for a tested version. */
@@ -1359,6 +1439,8 @@
             gate,
             checkHolder,
             onForeground,
+            beginGeneration,
+            endGeneration,
             /** Whether a failed `busy: false` is still waiting to be written. */
             hasPendingBusyClear: () => state.pendingBusyClear,
             start,
@@ -1379,6 +1461,8 @@
                 pair: page.pair ? Object.assign({}, page.pair) : null,
                 epoch: page.heldEpoch,
                 claiming: page.claiming,
+                generations: page.generations,
+                busy: page.busy,
             }),
         };
     }
@@ -1413,6 +1497,7 @@
         isServerData,
         isAllowlisted,
         isChatSave,
+        isGeneration,
         isCsrfTokenRequest,
         isLoginPage,
         createHeldRegistry,
@@ -1425,6 +1510,7 @@
         TESTED_ST_VERSIONS,
         READ_ALLOWLIST,
         CHAT_SAVE_PATHS,
+        GENERATION_PATHS,
         READ_WINDOW_MS,
         CSRF_ORDER_MAX_WAIT_MS,
         RELOAD_FALLBACK_MS,
@@ -1533,11 +1619,87 @@
             if (!isServerData(path, method)) return ctx.originalFetch(input, init);
             const signal = requestSignal(input, init);
             const hold = () => holdFetch(ctx.held, path, signal, ctx.makeAbortError);
-            return ctx.lease.gate(path, method).then(
-                (verdict) => (verdict === 'send' ? ctx.originalFetch(input, init) : hold()),
-                hold,
-            );
+            const send = () => (isGeneration(path, method)
+                ? sendGeneration(win, ctx, () => ctx.originalFetch(input, init), hold)
+                : ctx.originalFetch(input, init));
+            return ctx.lease.gate(path, method).then((verdict) => (verdict === 'send' ? send() : hold()), hold);
         };
+    }
+
+    /**
+     * Sends a generation request only after `busy: true` is confirmed (spec E8), and clears it once the
+     * response is over: body fully read or closed, an error, or a cancel (Stop). Never at the headers.
+     */
+    function sendGeneration(win, ctx, request, hold) {
+        return ctx.lease.beginGeneration().then((begin) => {
+            if (begin.status === 'hold') return hold();
+            if (begin.status === 'abort') throw new win.DOMException('TravelingTavern: reply not started', 'AbortError');
+            const end = once(() => { ctx.lease.endGeneration(); });
+            let pending;
+            try {
+                pending = request();
+            } catch (error) {
+                end();
+                throw error;
+            }
+            return pending.then((response) => trackBody(win, response, end, ctx.log), (error) => {
+                end();
+                throw error;
+            });
+        });
+    }
+
+    /** A function that runs at most once. */
+    function once(fn) {
+        let done = false;
+        return () => {
+            if (done) return;
+            done = true;
+            fn();
+        };
+    }
+
+    /**
+     * The same response, with its body passed through a stream that calls `end` when the body is fully
+     * read, errors, or is cancelled (spec E8). No body: `end` at once.
+     */
+    function trackBody(win, response, end, log) {
+        if (!response.body) {
+            end();
+            return response;
+        }
+        const reader = response.body.getReader();
+        const stream = new win.ReadableStream({
+            async pull(controller) {
+                try {
+                    const { done, value } = await reader.read();
+                    if (done) {
+                        end();
+                        controller.close();
+                    } else {
+                        controller.enqueue(value);
+                    }
+                } catch (error) {
+                    end();
+                    controller.error(error);
+                }
+            },
+            cancel(reason) {
+                end();
+                return reader.cancel(reason);
+            },
+        });
+        try {
+            const tracked = new win.Response(stream, { status: response.status, statusText: response.statusText, headers: response.headers });
+            Object.defineProperty(tracked, 'url', { value: response.url });
+            return tracked;
+        } catch (error) {
+            // Can't rebuild it: don't leave `busy` stuck (spec E8, R19); the reply may still stream.
+            log('warn', 'generation response not tracked: busy cleared at the headers');
+            reader.releaseLock();
+            end();
+            return response;
+        }
     }
 
     /** Wraps XMLHttpRequest (spec E6): held XHRs are never sent and never complete. */
@@ -1556,22 +1718,44 @@
             if (!target || !isServerData(target.path, target.method)) return send.apply(this, args);
             const xhr = this;
             const hold = () => { ctx.held.add(target.path, () => xhr.abort()); };
+            const generation = isGeneration(target.path, target.method);
             if (!target.async) {
-                // A synchronous XHR can't wait: sent only if no lease read is needed, else held.
-                if (ctx.lease.decideNow(target.path, target.method) === 'send') return send.apply(this, args);
+                // A synchronous XHR can't wait: sent only if no lease read is needed, else held. A
+                // generation always waits for `busy: true`, so a synchronous one is held.
+                if (!generation && ctx.lease.decideNow(target.path, target.method) === 'send') return send.apply(this, args);
                 return hold();
             }
-            ctx.lease.gate(target.path, target.method).then((verdict) => {
-                if (verdict !== 'send') return hold();
+            const sendNow = () => {
                 try {
                     send.apply(xhr, args);
+                    return true;
                 } catch (error) {
                     ctx.log('warn', 'XHR not sent after the lease check', { path: target.path });
+                    return false;
                 }
-                return undefined;
+            };
+            ctx.lease.gate(target.path, target.method).then((verdict) => {
+                if (verdict !== 'send') return hold();
+                if (!generation) return sendNow();
+                return sendXhrGeneration(ctx, xhr, sendNow, hold);
             }, hold);
             return undefined;
         };
+    }
+
+    /**
+     * A generation XHR (spec E8): sent after `busy: true` is confirmed, `busy` cleared on `loadend`. If
+     * `busy: true` can't be written, it's aborted (ST sees an abort, as with Stop).
+     */
+    function sendXhrGeneration(ctx, xhr, sendNow, hold) {
+        return ctx.lease.beginGeneration().then((begin) => {
+            if (begin.status === 'hold') return hold();
+            if (begin.status === 'abort') return xhr.abort();
+            const end = once(() => { ctx.lease.endGeneration(); });
+            xhr.addEventListener('loadend', end);
+            if (!sendNow()) end();
+            return undefined;
+        });
     }
 
     /** sendBeacon can't wait for a lease check: refused (false) unless holder (spec E6). */

@@ -51,6 +51,8 @@ function createHarness({ files = {}, storage = { [lease.STORAGE_KEYS.tabId]: 'pa
         stRequests: [],
         /** Reads of the lease file. */
         leaseReads: 0,
+        /** When set, answers ST's own requests: (url, init) => Response (e.g. a streamed reply). */
+        stResponder: null,
     };
     const uploads = [];
     const sleeps = [];
@@ -75,7 +77,9 @@ function createHarness({ files = {}, storage = { [lease.STORAGE_KEYS.tabId]: 'pa
             return Response.json({ token: server.csrfToken || 'disabled' });
         }
         if (method === 'GET' && url === '/version') return Response.json({ agent: 'x', pkgVersion: server.stVersion });
-        server.stRequests.push({ url: String(url), method, headers: new Headers(init.headers) });
+        const leaseText = server.files.get(lease.LEASE_FILE);
+        server.stRequests.push({ url: String(url), method, headers: new Headers(init.headers), leaseAtSend: leaseText ? JSON.parse(leaseText) : null });
+        if (server.stResponder) return server.stResponder(String(url), init);
         return Response.json({ ok: true });
     }
 
