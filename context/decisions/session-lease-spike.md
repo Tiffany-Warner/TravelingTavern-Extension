@@ -1,6 +1,6 @@
 # Session-Lease Spike: Results
 
-2026-11-20. Spike from `direction-change.md`, part 1 (desktop) only. Run against SillyTavern 1.19.0 in desktop Chrome, two to four tabs. Spike code lives on the local branch `spike/session-lease` (throwaway, not pushed, never merges): v1 `9673a60` refuse while parked · v2 `e2e692c` hold requests, modal overlay, ignore dry runs, 3 s grace · v3 `b12a3de` abort held requests, check every write, 1 s grace, re-raise overlay, reopen chat · v3.1 `a1aa3ba` log why a lease check fails.
+2026-11-20. Spike from `direction-change.md`, part 1 (desktop) only. Run against SillyTavern 1.19.0 in desktop Chrome, two to four tabs. Spike code lives on the local branch `spike/session-lease` (throwaway, not pushed, never merges): v1 `9673a60` refuse while parked · v2 `e2e692c` hold requests, modal overlay, ignore dry runs, 3 s grace · v3 `b12a3de` abort held requests, check every write, 1 s grace, re-raise overlay, reopen chat · v3.1 `a1aa3ba` log why a lease check fails · v4 `dda4e79` exempt nothing, abort only held chat saves, bounded lease-write retry · v4.1 `2943387` release marker on tab close, wait for the start decision · v4.2 `a3d6189` park and reload a holder restored from the back/forward cache. v4 onwards was tested only on a separate test install (SillyTavern 1.19.1, fresh data, Memory Books installed).
 
 ## Incident: the spike wrote to real user data
 
@@ -33,6 +33,22 @@ The spike ran on the SillyTavern install in daily use, with throwaway persona / 
 - **Before the extension parks a fresh desktop tab**, ST sends only reads: `/csrf-token`, `/version`, `/api/secrets/read`, `/api/settings/get`, `/api/extensions/discover`. Built-in translate, connection-manager and regex load before the extension
 - **Requests outside `fetch`:** XHR `POST /api/tokenizers/openai/count` (caught by the XHR wrapper); templates via XHR are static GETs. No `sendBeacon`. WebSockets not checked
 
+## Re-check on the test install (v4–v4.2)
+
+| Check | Result |
+|---|---|
+| Lease-write retry | Pass: the `EPERM` 500 recurred after a takeover; retry succeeded on attempt 2, no false park; six takeovers in a row clean |
+| No exemptions, held reads stay pending | Pass: parked tabs held Memory Books' reads of both files six times; takeovers didn't abort them; no default files written |
+| Only held chat saves aborted before a reload | Pass: reload went through with no "Leave site?"; the held message never reached disk |
+| Release on tab close | Pass: a new tab claimed without a click |
+| Holder refresh (F5) | Pass: stays holder, no extra reload; epoch bumped so its own marker stops counting |
+| Old tab closed after a takeover | Pass: its marker names its old claim; the new holder's lease untouched; a new tab parks |
+| Back/forward cache | v4.1 fail: a restored holder stayed unparked and its save reached disk. v4.2 pass: restored holder parks and reloads; a write at the moment of restore was held and never reached disk |
+| Takeover while generating | Pass (model connected): the new tab waited for `busy`, the reply was saved before it loaded |
+
+- Switch time (1 s grace, click to reopened chat): 3.2–3.3 s
+- **Release timing:** the marker is written on `pagehide`, not `beforeunload`. `pagehide` fires only when the page really leaves (after a "Leave site?" prompt is accepted; a cancelled prompt releases nothing). It also fires when the page enters the back/forward cache, hence the v4.2 fix
+
 ## Findings
 
 - **False park of the real holder:** `/api/files/upload` answered 500 on a lease metadata write right after a takeover reload (seen 4 times, reproduced). Server error: `EPERM: operation not permitted, rename 'tt-session-lease.json.<n>' -> 'tt-session-lease.json'` from `write-file-atomic` (`renameSync`, no retry). Windows refuses to rename over a file another handle has open (a concurrent lease read, or a virus scanner on the fresh file). Transient
@@ -42,10 +58,15 @@ The spike ran on the SillyTavern install in daily use, with throwaway persona / 
 - ST popups are modal dialogs: anything outside them is inert, including an overlay opened earlier
 - The holder sends `POST /api/quick-replies/save` on every page load (whole-file save at load)
 - After updating the extension, one tab kept running cached code until closed
+- **`busy` sticks when a generation fails before it starts:** with no model connection ST fires `GENERATION_STARTED` and returns early with no end event; the next takeover waited the full 60 s timeout
+- After a takeover reload ST does not reconnect to the model unless its auto-connect option is on
+- Closing a tab doesn't release the lease by itself: without the release marker every desktop switch after closing the holder costs a **Use here** click. The marker is best effort (a crash or killed browser skips it), so **Use here** stays the fallback
 
 ## Verdict
 
 The session lease protects every data type tested with one rule and no knowledge of ST's save endpoints. Parking is tolerable with held requests: ST stays quiet behind the overlay, and a switch costs about 3.5 s. It is **not safe as spiked**: one exemption let a parked tab overwrite real user files, and a transient Windows error parks the real holder. Both have clear fixes (below). Proceed to a spec with the requirements below, then run part 2 (the app) on a separate install before building the release.
+
+**Update after the re-check (v4–v4.2):** both fixes, release on tab close and the back/forward-cache handling pass on the test install. Open before the spec: part 2 (the app), `busy` stuck after an early generation failure, WebSockets, check cost from the Pixel.
 
 ## Requirements for the spec
 
@@ -63,3 +84,9 @@ The session lease protects every data type tested with one rule and no knowledge
 12. **Open:** WebSockets; Memory Books' default-file behavior in the holder; part 2 (app: hold first requests at document start, foreground takeover, release in background)
 13. **`coding-standards.md` must be updated** before building: the bounded retry delay and the grace wait are one-off delays. Allow one-off delays; keep the ban on polling and repeating timers. The spike's wait for `busy` re-reads the lease every second, which is polling: the spec must replace it or name it as a bounded exception
 14. **Testing:** every manual test, spike and cleanup on a separate SillyTavern install; no unreleased guard or lease code in the install in daily use
+15. **Release on tab close, best effort:** on `pagehide` the holder writes a separate release marker naming its exact claim (`holder` + `epoch`) with `fetch(..., { keepalive: true })` (not `sendBeacon`: the upload needs the CSRF header). It never writes the lease itself, so a later claim can't be undone. A new page treats the lease as free only if the marker matches the lease's holder and epoch; a released claim's `busy` is stale and not waited for. **Use here** stays the fallback when no marker was written
+16. **A refreshed holder bumps its epoch before unparking**, so its own release marker stops counting
+17. **Back/forward cache:** `pagehide` also fires on entering the cache, so a holder restored from it (`pageshow` with `persisted`) parks at once and reloads; the fresh load re-checks the lease
+18. **Requests made before the start decision wait for it:** sent if the page turns out to be holder, held if parked (never held for good in a holder page)
+19. **`busy` must not stick after a generation that fails before it starts** (no end event): decide how the holder clears it, or how a claimer recognizes a stale `busy` without polling. The 60 s limit caps it until then
+20. **After a takeover reload, the model connection must be restored or the user told how.** On the phone every takeover is a reload; without a connection the user takes over a chat and can't generate a reply. The spec decides which (e.g. reconnect after a takeover reload, or require ST's auto-connect and say so); don't rely on auto-connect being on
