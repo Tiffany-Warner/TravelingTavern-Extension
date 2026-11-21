@@ -1,12 +1,18 @@
 # TravelingTavern Extension `v0.2.0` — Session Lease
 
-> **Draft.** Sections 2 and 11 (the shared contract) are written for review; the other sections follow the outline (`session-lease-outline.md`) once these are settled.
+> **Draft for review.** Sections 2 and 11 (shared contract) reviewed and committed; sections 1 and 3–14 awaiting review. Items marked **(verify)** must be confirmed in SillyTavern's source before they're built on.
 
 Replaces `ext-0.1-save-guard-spec.md` (superseded). Requirements: `context/decisions/session-lease-spike.md` (cited as **R1–R44**). Plan and requirement map: `session-lease-outline.md`. App side: the TravelingTavern repo's `session-lease-app-spec.md`, which references this spec for every shared definition and never restates it.
 
 ## 1. Purpose and Rule
 
-*(to be written)*
+**Rule:** nothing TravelingTavern runs may delete or overwrite SillyTavern (ST) data unless the user confirmed it in a dialog. Saving an older copy over newer data counts as deleting.
+
+**Problem:** an ST page reads data once and later saves whole files from its own copy. A page left open on one device erases what another device saved since (seen for chats, settings, lorebooks, personas and extension files).
+
+**Design: one active page per ST user.** A small lease file names the page that may write. Every other page is **parked**: it shows an overlay with **Use here**, and its requests to the server are held, never sent. Use here claims the lease and reloads the page, so it starts from fresh data. The lease needs no knowledge of which endpoints save what; the per-save guard it replaces did (`ext-0.1-save-guard-spec.md`, superseded; why: `context/decisions/direction-change.md` and `architecture-assessment.md`; evidence: `session-lease-spike.md`).
+
+**Scope:** every page that runs `session-lease.js`: desktop tabs with this extension installed, and the TravelingTavern app's page (bundled copy, app spec). Pages without it are not protected (E13).
 
 ## 2. Lease and Release Files *(shared contract)*
 
@@ -86,35 +92,121 @@ No decision uses a clock time from the files: devices' clocks differ (seconds ap
 
 ## 3. Lease Writes
 
-*(to be written)*
+- **One write in flight at a time** (R24): claims, epoch bumps and `busy` / `active` updates go through one queue in the page. Otherwise an update that read the lease before an epoch bump can write the old epoch back
+- **Every update re-reads first** and writes only if the lease still holds this page's pair (E2). Pair changed → park (`lost`); unreadable → park (`unreadable`)
+- **Bounded retry** (R7): a failed write (e.g. Windows `EPERM`, answered as 500) is retried after a random 100–200 ms, at most 3 attempts in total, re-reading before each. The page parks only if the pair changed or the lease can't be read. A write that still fails after 3 attempts leaves the page holder and is logged
+- **Skip unchanged writes:** no write when `busy` and `active` already have the values to be written
+- **A failed `busy: true` is not just metadata:** claimers wouldn't wait for this reply. **Only after the retry above has failed**, the page stops the generation with ST's own stop and shows one toast: "Couldn't reach SillyTavern to start the reply. Try again."
+- One-off delays (this retry, the grace wait in E4) are bounded and allowed; no repeating timers (`coding-standards.md`, R34)
 
 ## 4. Claim and Takeover
 
-*(to be written)*
+**Claim** (Use here, an automatic claim at start, or the app's `useHere()` / `onForeground()`):
+
+1. Read the lease and the marker. Unknown format → park (`unknownFormat`) and stop
+2. **Wait for `busy`** (R6, R35) unless the lease is released (its `busy` is stale) or there is no lease: re-read once per second for at most 60 s while the lease is `busy`, reporting `waitingForReply`. This is the one named exception to "no polling" (`coding-standards.md`): bounded, only during a claim, ends at 60 s. A `busy` that can never clear (R19) is prevented by E8, not waited out
+3. Write `{ format, holder: own id, epoch: lease.epoch + 1 (1 if no lease), claimedAt, busy: false, active: carried over }`
+4. **Grace:** wait 1 s, so a write the old holder already sent lands before this page loads
+5. **Verify:** re-read; continue only if the lease holds this page's pair, else park (`lostRace`). Two pages claiming at once end with exactly one holder: the last write wins, the other's verify fails
+6. Set the reopen flag (`sessionStorage`), abort held chat saves (E7), reload
+
+**Start decision** (every page load; requests wait for it, E6):
+
+- Lease names this page's id: a refresh, or a duplicated tab that copied `sessionStorage`. **Always bump the epoch** to `(own id, epoch + 1)` and verify (pair rule, E2) before becoming holder. The newest load with that id wins; an older page with the same id fails its next pair check and parks
+- No lease, or the lease is released → **automatic claim** (steps 1–6, no click), at most once per tab between successful loads (a `sessionStorage` mark prevents a reload loop)
+- Otherwise → parked (`held`). Lease or marker unreadable → parked (`unreadable`)
+
+**Reopen the chat** (R10, R30): after a reload that follows any claim (Use here or automatic), once ST fires `APP_READY` and the page is holder, read `active` and open it with ST's context functions: group → `openGroupChat(groupId, chatFile)`; character → `selectCharacterById(index of avatar)`, then `openCharacterChat(chatFile)` if that chat isn't already open. A character or group that no longer exists → stay on ST's start screen (logged). While the reopen flag is set, ST's startup `CHAT_CHANGED` with no chat doesn't overwrite `active`.
+
+**Recording the open chat:** on `CHAT_CHANGED` the holder writes `active` (E3; skipped when unchanged).
 
 ## 5. Release (desktop)
 
-*(to be written)*
+Best effort, so closing the holder doesn't cost the next page a click (R15). The app releases differently: app spec A5.
+
+- On **`pagehide` only** (not `beforeunload`, which fires before a "Leave site?" prompt the user may cancel). Only a holder releases; a parked page reloading after a claim never does
+- Sent with `fetch(..., { keepalive: true })` through the original `fetch` with ST's request headers (not `sendBeacon`: the upload needs the CSRF header). Body: the release marker (E2) naming this page's exact pair. Never touches the lease
+- **A refreshed holder** finds its own marker matching; the always-bump at start (E4) makes it stop counting (R16)
+- **Back/forward cache** (R17): `pagehide` also fires when a page enters the cache, so a holder restored from it (`pageshow` with `persisted`) has released its claim. It parks at once (holds everything) and reloads; the fresh load decides as in E4
+- **No marker** (browser crash, killed tab, power loss): the next page parks and offers Use here
 
 ## 6. Request Wrapper
 
-*(to be written)*
+Wraps `window.fetch` and `XMLHttpRequest.prototype.open` / `send`. Nothing else in ST is patched.
+
+**Server data** = a path under `/api/` or `/user/`, or any method other than `GET`. Everything else (scripts, styles, templates, images, `/csrf-token`, `/version`) passes untouched.
+
+| Page state | Server-data request |
+|---|---|
+| Before the start decision (R18) | Waits for it, then as below |
+| Holder, non-`GET`, not allowlisted | Re-reads the lease first (pair check); sent only if still holder, else the page parks and holds it |
+| Holder, `GET` or allowlisted | Sent if the last lease read is at most 2 s old; otherwise re-read first, as above (R5, R21) |
+| Parked | **Held** (R2): never sent, never refused |
+
+- **Exempts nothing** (R1): no request passes by URL while parked. The lease's own reads and writes use the original `fetch` captured at install, so they never pass through the wrapper
+- **Held** fetches return a promise that stays pending; only their path and reject function are kept, never the request, so no code path can send one later. Held XHRs are never sent and never complete. Refusing instead broke ST's startup in the spike
+- **`navigator.sendBeacon`** while parked returns `false` without sending
+- **Fail closed** (R11): a lease read that fails parks the page and holds the request
+- **Allowlist** (R21): read-only `POST` endpoints, each confirmed read-only in ST's source for every tested ST version, kept in a named constant. Candidates seen in the spike, all **(verify)**: `/api/settings/get`, `/api/characters/all`, `/api/characters/get`, `/api/groups/all`, `/api/chats/get`, `/api/chats/group/get`, `/api/chats/recent`, `/api/worldinfo/get`, `/api/avatars/get`, `/api/backgrounds/all`, `/api/backgrounds/folders`, `/api/image-metadata/all`, `/api/secrets/read`, `/api/stats/get`, `/api/sd/comfy/workflows`, `/api/tokenizers/*/encode`, `/api/tokenizers/*/count`. Anything not listed is checked. Allowlisted requests are still held while parked. On an untested ST version the allowlist is off (E12)
+- **Before the extension loads** (desktop) ST sends only reads (`/csrf-token`, `/version`, `/api/secrets/read`, `/api/settings/get`, `/api/extensions/discover`; seen on 1.19.0 and 1.19.1). In the app the bundled copy is installed at document start, before any of them
+- **WebSockets: to check** (R31): whether ST or an extension sends server data over a WebSocket, which the wrapper doesn't see. A known limit until checked (E13)
 
 ## 7. Parking and Reloads
 
-*(to be written)*
+- **A page becomes writable only through a fresh load that holds the lease** (R4): the start decision (E4) is the only place a page unparks. A page that lost the lease never re-claims by itself; it offers Use here, which claims and reloads
+- Parking is immediate: from that moment every new server-data request is held
+- **Before any reload, abort only held chat saves** (R3): held `/api/chats/save` and `/api/chats/group/save` are rejected with an `AbortError`, so ST's `isChatSaving` clears and its `beforeunload` doesn't block the reload with "Leave site?". These paths are a named constant **(verify per ST version)**
+- **Held reads are never aborted:** an extension that sees a failed read may write a default file (Memory Books did, through the spike's exemption). They stay pending until the page unloads
+- No held request is ever sent, before or after a reload
 
 ## 8. `busy`
 
-*(to be written)*
+`busy` tells claimers the holder is generating a reply (R8, R19).
+
+- **Tied to the generation request itself,** not to ST's `GENERATION_STARTED` event, which also fires for dry runs and, when a generation fails before it starts, has no end event. The wrapper sets `busy: true` when it sends a request to a generation endpoint and `busy: false` only when that response is over: the body fully read or the stream closed, an error, or the read cancelled (Stop). **Never when the headers arrive:** a streaming reply continues long after them. Dry runs and generations that fail before sending never set it
+- Generation endpoints, a named constant **(verify per ST version)**: `/api/backends/chat-completions/generate`, `/api/backends/text-completions/generate`, `/api/backends/kobold/generate`, `/api/novelai/generate`, `/api/horde/generate-text`
+- Several generation requests at once (e.g. an extension's background summary during a reply): `busy` stays `true` until the last one finishes
+- Written through the lease-write queue (E3); a failed `busy: true` → E3
+- A released claim's `busy` is ignored (E5). The wait itself is bounded at 60 s (E4)
 
 ## 9. Web Overlay (desktop)
 
-*(to be written)*
+Shown by `index.js` from `tt-lease` events (E11). **Overlay only, no toast** for parked tabs. Never shown in the app's page.
+
+**Behavior**
+
+- A `<dialog>` opened with `showModal()`, covering the window, so it sits above ST's loader and popups and everything under it is inert. Whenever another dialog opens while parked (ST popups are modal), the overlay is closed and re-opened so it is the top modal again and **Use here** stays clickable. Escape can't close it
+- **Use here** calls `window.__ttLease.useHere()`
+
+**Design**
+
+- A modern **centered card** on a **dimmed, blurred backdrop** (`::backdrop` with a translucent dark tint and `backdrop-filter: blur(var(--blurStrength))`)
+- Card: rounded corners (about 16 px), soft shadow, comfortable padding, max width about 360 px, full width minus margins on narrow windows
+- Content, top to bottom: a clear **title**, **one line** of text, then a **large, full-width, rounded "Use here" button**
+- While claiming (`claiming`, `waitingForReply`): a **spinner** replaces the button. Under `prefers-reduced-motion: reduce` the spinner doesn't rotate (a static indicator instead)
+- **Colors from ST's theme variables** (confirmed in ST 1.19.1 `public/style.css`), so it matches the user's theme: card background `--SmartThemeBlurTintColor`, text `--SmartThemeBodyColor`, border `--SmartThemeBorderColor`, shadow `--SmartThemeShadowColor`, spinner accent `--SmartThemeQuoteColor`, font size `--mainFontSize`, transitions `--animation-duration`
+- The button **builds on ST's `menu_button` class** (theme colors and border) with overrides only for size: full width, larger padding, larger radius, larger text (`menu_button` defaults to `width: min-content` and `border-radius: 5px`)
+- **Static markup built with DOM methods** (`createElement`, `textContent`); no HTML strings, no data in markup, no external fonts or assets. Styles in one `<style>` element the extension adds once, every rule scoped to the overlay's own class prefix
+- No other change to ST's look
+
+**Texts by `reason`**
+
+| `reason` | Title | Line | Control |
+|---|---|---|---|
+| `held`, `lost` | In use on another device | Use SillyTavern here instead? | Use here |
+| `claiming` | Taking over… | Loading your chat on this device. | spinner |
+| `waitingForReply` | Finishing a reply… | Your other device is still writing a reply. | spinner |
+| `lostRace` | Another device took over | It claimed SillyTavern first. | Use here |
+| `unreadable` | Can't reach SillyTavern | Nothing is saved from this page. | Use here |
+| `unknownFormat` | Update needed | Update the TravelingTavern extension to use SillyTavern here. | none |
 
 ## 10. Model Connection After a Takeover Reload
 
-*(to be written)*
+ST connects to the model at startup only when its **Auto-connect** option is on (`power_user.auto_connect`, off by default). After a takeover reload the user would otherwise land in their chat unable to generate (R36; seen on desktop and in the app).
+
+- After a reload that follows a claim, once `APP_READY` has fired and the page is holder: if ST's `onlineStatus` is `no_connection`, the page presses ST's own connect button for the selected API, once: the same buttons ST's auto-connect presses (`#api_button`, `#api_button_novel`, `#api_button_textgenerationwebui`, `#api_button_openai`, chosen by `main_api`) **(verify)**
+- Still not connected after ST's own attempt: desktop shows one toast, "Not connected to a model. Connect in API Connections."; the app shows its native notice (A7), from a `connected` field in `leaseState` (additive, no `format` bump)
+- Never changes ST's settings (doesn't turn Auto-connect on)
 
 ## 11. App Contract *(shared)*
 
@@ -160,6 +252,7 @@ Posted as JSON strings to the app's `TravelingTavern` listener, main frame only,
 | `pageId` | string | This page's `holder` id |
 | `epoch` | integer or `null` | The epoch this page holds; `null` if it never held the lease in this load |
 | `busy` | boolean | This page is generating a reply |
+| `connected` | boolean | ST is connected to a model (`onlineStatus` isn't `no_connection`); the app shows its notice when a holder reports `false` after a takeover (E10, A7) |
 | `origin` | string | `location.origin`, where Kotlin reads the lease files and sends its release |
 
 Kotlin's pre-check (A4) compares the lease file's `holder` and `epoch` with the last `leaseState`'s `pageId` and `epoch`.
@@ -212,12 +305,53 @@ The app's own `window.__ttBridge` is not part of this contract.
 
 ## 12. Version Check
 
-*(to be written)*
+- `TESTED_ST_VERSIONS` in `session-lease.js`: the ST versions this lease was tested against, starting with **1.19.0 and 1.19.1** (the spike). Read from ST's `/version` at start
+- The lease depends on ST's endpoint names in only three places: the allowlist (E6), the chat-save paths aborted before a reload (E7) and the generation endpoints (E8). Everything else is held or checked whatever its name
+- **Untested ST version:** the allowlist is turned off (every request is checked: slower, never less safe); `leaseInfo.untestedServer` is `true`; desktop shows one toast per ST version: "TravelingTavern hasn't been tested with this SillyTavern version." Chat-save and generation paths stay as they are: if ST renamed them, a reload may show "Leave site?" or a takeover may not wait for a reply, and the checklist (E14) catches both before the version is added
+- On every ST release: re-check the three lists in ST's source, run the checklist on the test install, then add the version
 
 ## 13. Known Limits
 
-*(to be written)*
+| Limit | Effect | What would close it |
+|---|---|---|
+| Pages without the lease code (a desktop browser without the extension, the extension disabled, other ST clients, scripts) | They write freely | A server plugin that enforces the lease on the server |
+| A write slower than the grace period plus the new holder's reload | It could land after the new holder loaded (not seen in the spike, incl. a 3 MB save) | Server plugin: refuse writes from a page that isn't the holder |
+| Release is best effort | A crash leaves the lease held; the next page needs Use here | — (by design) |
+| WebSockets not checked (R31) | Unknown | Check, then wrap or rule out |
+| Memory Books writes default files in the holder when a read fails transiently (R32) | A transient server error can reset that extension's files | Outside the lease; report to Memory Books |
+| Switch cost (R22, measured) | Desktop about 3.3 s, phone about 6.6 s from Use here to the reopened chat; about 1.8 s of the phone's is the lease (grace and checks), the rest is ST reloading. The allowlist removes most of the check time | Server plugin (no reload needed) |
+| A reply can't move to another device | A takeover waits for the reply (up to 60 s), then reloads | — |
 
 ## 14. Tests
 
-*(to be written)*
+**Unit** (`node --test`, no dependencies, fake `fetch`, one file per topic under `test/`). The lease's decisions are pure functions inside `createSessionLease({ fetch, post, now, sleep, storage, log })`; the browser wrapper stays thin.
+
+- Files: 404 vs unreadable; malformed JSON, missing fields; unknown fields ignored; unknown or missing `format` → park; released only on an exact pair match with known formats; a stale marker means nothing
+- Pair rule: claim verify; epoch-bump verify; a bump and a claim writing the same epoch
+- Claim: busy wait bounded at 60 s and skipped when released; grace; lost race; reopen flag; automatic claim at most once per tab
+- Start decision: own id → bump; requests wait for the decision; duplicated tab (same id) → the older page parks on its next check
+- Writes: one in flight; re-read before each; 3 attempts 100–200 ms apart; park only on a pair change or unreadable; unchanged writes skipped; failed `busy: true`
+- Wrapper: what counts as server data; holder vs parked; 2 s read window; allowlist on and off (untested ST); held promises never settle; only chat saves aborted before a reload; `sendBeacon` refused while parked
+- `busy`: set by a generation request; cleared only when the body is fully read or the stream closes, on error and on cancel, never when the headers arrive; dry runs never set it; overlapping generations
+- Messages: `leaseState` and `leaseInfo` payloads; no CSRF token or ST data in any message
+
+**Manual checklist, on the separate test install only** (never the install in daily use: `ai-guidelines.md`). Throwaway persona, lorebook, character and chat; Memory Books installed. Delete any lease files the spike left before starting.
+
+- [ ] Two pages: the second parks; a stale page's chat, persona, card, lorebook and settings saves never reach the server
+- [ ] Use here: same chat reopened; switch time recorded
+- [ ] Two simultaneous Use here: exactly one holder
+- [ ] Takeover while generating: claimer waits, reply saved before it loads. No model connected: no stuck `busy`
+- [ ] Save queued just before a takeover: held, or saved and visible in the new holder
+- [ ] Holder refresh: stays holder, epoch bumped. Duplicated tab: the older copy parks
+- [ ] Close the holder: the next tab claims without a click. Close an old tab after a takeover: the lease is untouched
+- [ ] Back/forward cache: a restored holder parks and reloads; a write at restore never reaches disk
+- [ ] Held chat save before a reload: no "Leave site?"
+- [ ] Parked tab with Memory Books: held reads stay pending, no default files written
+- [ ] ST popup open before and after parking: overlay on top, Use here works
+- [ ] Overlay design: card, blurred backdrop, theme colors in a light and a dark ST theme; spinner static under reduced motion
+- [ ] Server unreachable: pages park, nothing sent after the restart
+- [ ] Lease write `EPERM` (Windows): retried, no false park
+- [ ] Unknown `format` in the lease file: page parks with the update message, writes nothing
+- [ ] Untested ST version: toast once, every request checked
+- [ ] Model connection restored after a takeover reload
+- [ ] The app's checks: app spec checklist
