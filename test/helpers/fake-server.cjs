@@ -31,6 +31,12 @@ function createHarness({ files = {}, storage = { [lease.STORAGE_KEYS.tabId]: 'pa
         failAfterWrite: 0,
         /** Called before each upload is applied; may change server state (another page writing). */
         beforeUpload: null,
+        /** Called right after an upload was written, before its answer (a write in flight). */
+        afterUpload: null,
+        /** When set, an upload's answer waits for this promise (a slow answer). */
+        answerGate: null,
+        /** Called when a lease-file read is answered. */
+        onLeaseRead: null,
         /** Called on every sleep with the delay; may change server state (time passing elsewhere). */
         onSleep: null,
         /** When set, uploads need this X-CSRF-Token header (else 403), and /csrf-token answers it. */
@@ -74,7 +80,10 @@ function createHarness({ files = {}, storage = { [lease.STORAGE_KEYS.tabId]: 'pa
     }
 
     function answerRead(name) {
-        if (name === lease.LEASE_FILE) server.leaseReads++;
+        if (name === lease.LEASE_FILE) {
+            server.leaseReads++;
+            if (server.onLeaseRead) server.onLeaseRead();
+        }
         if (name === lease.LEASE_FILE && server.failLeaseReads > 0) {
             server.failLeaseReads--;
             return new Response('error', { status: 500 });
@@ -101,6 +110,8 @@ function createHarness({ files = {}, storage = { [lease.STORAGE_KEYS.tabId]: 'pa
                 return new Response('EPERM', { status: 500 });
             }
             server.files.set(name, text);
+            if (server.afterUpload) server.afterUpload(name);
+            if (server.answerGate) await server.answerGate;
             if (server.failAfterWrite > 0) {
                 server.failAfterWrite--;
                 return new Response('error', { status: 500 });

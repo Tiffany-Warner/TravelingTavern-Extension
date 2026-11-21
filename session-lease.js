@@ -1220,7 +1220,9 @@
                     return true;
                 }
             }
-            const read = await readLease();
+            // Through the write queue, so it never reads a write (e.g. a foreground bump) whose outcome
+            // the page hasn't processed yet.
+            const read = await enqueue(() => readLease());
             if (page.phase !== PHASE.holder) return false;
             if (!holdsPair(page.pair, pair)) return mayRepeat ? runCheck(false) : false;
             const verified = decideVerify(read, pair, PARK_REASON.lost);
@@ -1248,10 +1250,24 @@
             }
         }
 
-        /** onForeground for a holder: invalidates its own release marker with an epoch bump. */
+        /** Whether the page is still holder of exactly this pair (after an await). */
+        function stillHolds(pair) {
+            return page.phase === PHASE.holder && holdsPair(page.pair, pair);
+        }
+
+        /** The outcome for a holder step that found the page no longer holder of its pair after an await. */
+        function notHolderAnyMore() {
+            return { status: page.phase, reason: page.reason };
+        }
+
+        /**
+         * onForeground for a holder: invalidates its own release marker with an epoch bump. Stops as soon as
+         * the page is no longer holder of the pair it started with (a check parked it meanwhile).
+         */
         async function foregroundHolder() {
             const pair = page.pair;
             const [leaseRead, markerRead] = await readBoth();
+            if (!stillHolds(pair)) return notHolderAnyMore();
             if (markerRead.kind === 'unknownFormat') return park(PARK_REASON.unknownFormat);
             const verified = decideVerify(leaseRead, pair, PARK_REASON.lost);
             if (!verified.ok) return park(verified.reason);
@@ -1260,13 +1276,17 @@
                 return { status: 'holder', pair };
             }
             const outcome = await bumpEpoch(pair, {});
+            if (!stillHolds(pair)) return notHolderAnyMore();
             if (outcome.status === 'parked') return park(outcome.reason);
             const next = { holder: pair.holder, epoch: pair.epoch + 1 };
             page.pair = next;
             page.heldEpoch = next.epoch;
             report();
             await sleep(GRACE_MS);
-            const again = decideVerify(await readLease(), next, PARK_REASON.lost);
+            if (!stillHolds(next)) return notHolderAnyMore();
+            const read = await readLease();
+            if (!stillHolds(next)) return notHolderAnyMore();
+            const again = decideVerify(read, next, PARK_REASON.lost);
             if (!again.ok) return park(again.reason);
             page.verifiedAt = now();
             log('info', 'release marker invalidated', { epoch: next.epoch });
