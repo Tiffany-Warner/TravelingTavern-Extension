@@ -115,6 +115,11 @@
         textgenerationwebui: '#api_button_textgenerationwebui',
         openai: '#api_button_openai',
     });
+    /**
+     * The class ST's `startStatusLoading()` adds to every connect button while an attempt runs, and
+     * `stopStatusLoading()` removes (spec E10, E15).
+     */
+    const CONNECTING_CLASS = 'disabled';
     /** After pressing connect, the page waits at most this long for ST's attempt (spec E10). */
     const CONNECT_WAIT_MS = 10000;
 
@@ -740,6 +745,17 @@
      */
     function isConnected(context) {
         return isObject(context) && typeof context.onlineStatus === 'string' && context.onlineStatus !== NO_CONNECTION;
+    }
+
+    /**
+     * Whether ST's own connect attempt is running (spec E10): its button carries CONNECTING_CLASS from
+     * `startStatusLoading()` until `stopStatusLoading()`. A press then would start a second status check.
+     * @param {{ classList?: { contains: Function } }|null} button ST's connect button.
+     * @returns {boolean} True while an attempt runs.
+     */
+    function isConnecting(button) {
+        return isObject(button) && isObject(button.classList) && typeof button.classList.contains === 'function'
+            && button.classList.contains(CONNECTING_CLASS) === true;
     }
 
     // ---- The lease ---------------------------------------------------------------------------
@@ -1715,6 +1731,7 @@
         decideReopen,
         decideConnect,
         isConnected,
+        isConnecting,
         createStHooks,
         READ_WINDOW_MS,
         CSRF_ORDER_MAX_WAIT_MS,
@@ -2027,7 +2044,8 @@
      * @param {Function} deps.log Logger.
      * @param {Function} deps.setTimeout Timer for the bounded connect wait.
      * @param {Function} deps.clearTimeout Clears it.
-     * @param {(selector: string) => { click: Function }|null} deps.querySelector Finds ST's connect button.
+     * @param {(selector: string) => { click: Function, classList: object }|null} deps.querySelector Finds
+     *     ST's connect button.
      * @returns {{ attach: (context: object) => void, afterAppReady: () => Promise<void> }} `attach`
      *     subscribes to ST's events once its context exists.
      */
@@ -2080,14 +2098,18 @@
             });
         }
 
-        /** Presses ST's connect button once if not connected; `notConnected` if ST's attempt fails. */
+        /**
+         * Presses ST's connect button once if not connected and ST isn't already connecting (e.g. its own
+         * Auto-connect); `notConnected` if ST's attempt fails.
+         */
         async function reconnect(kind) {
             const context = fresh();
             const decision = decideConnect(kind, context && context.onlineStatus, context && context.mainApi);
             if (decision.action === 'none') return;
             const button = decision.button ? querySelector(decision.button) : null;
-            if (button) button.click();
-            log('info', 'connecting after a takeover', { pressed: button !== null });
+            const connecting = isConnecting(button);
+            if (button && !connecting) button.click();
+            log('info', 'connecting after a takeover', { pressed: button !== null && !connecting, alreadyConnecting: connecting });
             if (await waitForConnection(context)) return;
             log('info', 'not connected after a takeover');
             post('leaseNotice', { kind: 'notConnected' });

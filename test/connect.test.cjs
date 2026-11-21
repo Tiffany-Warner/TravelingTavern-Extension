@@ -6,13 +6,18 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
-const { decideConnect, isConnected, createStHooks, CONNECT_BUTTONS, CONNECT_WAIT_MS } = require('../session-lease.js');
+const { decideConnect, isConnected, isConnecting, createStHooks, CONNECT_BUTTONS, CONNECT_WAIT_MS } = require('../session-lease.js');
 const { createHarness, leaseFile, LEASE, KEYS } = require('./helpers/fake-server.cjs');
 const { createFakeSt, createFakeTimers, EVENT_TYPES } = require('./helpers/fake-st.cjs');
 const { createFakeWindow, flush } = require('./helpers/fake-window.cjs');
 
-/** The load right after a claim of `kind`, with ST hooks around a fake ST. */
-function afterClaim(kind, stOptions) {
+/**
+ * The load right after a claim of `kind`, with ST hooks around a fake ST.
+ * @param {string} kind The claim's kind.
+ * @param {object} [stOptions] Fake ST options.
+ * @param {boolean} [connecting] ST's connect button carries `disabled` (an attempt is running).
+ */
+function afterClaim(kind, stOptions, connecting = false) {
     const h = createHarness({
         files: { [LEASE]: leaseFile({ holder: 'page-a.0123456789abcdef', epoch: 5 }) },
         storage: { [KEYS.tabId]: 'page-a', [KEYS.reopen]: kind },
@@ -28,7 +33,10 @@ function afterClaim(kind, stOptions) {
         log: () => {},
         setTimeout: timers.setTimeout,
         clearTimeout: timers.clearTimeout,
-        querySelector: (selector) => ({ click: () => clicks.push(selector) }),
+        querySelector: (selector) => ({
+            click: () => clicks.push(selector),
+            classList: { contains: (name) => connecting && name === 'disabled' },
+        }),
     });
     hooks.attach(st.getContext());
     return { h, st, timers, clicks, notices, hooks };
@@ -94,6 +102,34 @@ test('connected at the end of the wait without a change event: no notice', async
     t.timers.runAll();
     await done;
     assert.deepStrictEqual(t.notices, []);
+});
+
+test('isConnecting: ST’s disabled class on the connect button', () => {
+    const button = (classes) => ({ classList: { contains: (name) => classes.includes(name) } });
+    assert.strictEqual(isConnecting(button(['api_button', 'disabled'])), true);
+    assert.strictEqual(isConnecting(button(['api_button'])), false);
+    assert.strictEqual(isConnecting(null), false);
+    assert.strictEqual(isConnecting({}), false);
+});
+
+test('ST already connecting (its own Auto-connect): no second press; its attempt still decides', async () => {
+    const t = afterClaim('useHere', {}, true);
+    const done = t.hooks.afterAppReady();
+    await settle();
+    assert.deepStrictEqual(t.clicks, []);
+    assert.deepStrictEqual(t.timers.pending(), [CONNECT_WAIT_MS]);
+    t.st.setOnlineStatus('Valid');
+    await done;
+    assert.deepStrictEqual(t.notices, []);
+});
+
+test('ST already connecting and still not connected after the wait: notConnected', async () => {
+    const t = afterClaim('useHere', {}, true);
+    const done = t.hooks.afterAppReady();
+    await settle();
+    t.timers.runAll();
+    await done;
+    assert.deepStrictEqual([t.clicks, t.notices], [[], [{ type: 'leaseNotice', kind: 'notConnected' }]]);
 });
 
 test('the automatic claim never presses connect, never reports notConnected', async () => {
