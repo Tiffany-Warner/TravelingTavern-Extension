@@ -1,6 +1,6 @@
 # TravelingTavern Extension `v0.2.0` — Session Lease
 
-> **Reviewed** 2026-11-20; updated 2026-11-21 (overlay review, freeze/resume). Items marked **(verify)** must be confirmed in SillyTavern's source before they're built on.
+> **Reviewed** 2026-11-20; updated 2026-11-21 (overlay review, freeze/resume, reopen and reconnect verified). Items marked **(verify)** must be confirmed in SillyTavern's source before they're built on.
 
 Replaces `ext-0.1-save-guard-spec.md` (superseded). Requirements: `context/decisions/session-lease-spike.md` (cited as **R1–R44**). Requirement map: `session-lease-spike.md` → Requirement Map (final). App side: the TravelingTavern repo's `session-lease-app-spec.md`, which references this spec for every shared definition and never restates it.
 
@@ -101,7 +101,7 @@ No decision uses a clock time from the files: devices' clocks differ (seconds ap
     - **`busy: false`** → the page stays holder and keeps the pending `busy: false`: it is written with the holder's next lease write or lease check, until it lands, so the file never stays `busy: true` after a reply
 - **Skip unchanged writes:** no write when `busy` and `active` already have the values to be written
 - **A failed `busy: true` is not just metadata:** claimers wouldn't wait for the reply. The generation request is sent only after `busy: true` is written and confirmed (E8). If that write fails after the retry above, the request is **not sent**: the wrapper rejects it with an `AbortError` (as ST's Stop would), so ST ends the generation, and the page reports `leaseNotice` `replyNotStarted` (E11): desktop shows one toast, "Couldn't reach SillyTavern to start the reply. Try again."; the app shows its native notice (A7)
-- One-off delays (this retry, the grace wait in E4, the CSRF ordering wait in E6, the reload's one-task wait and 2.5 s fallback in E7) are bounded and allowed; no repeating timers (`coding-standards.md`, R34)
+- One-off delays (this retry, the grace wait in E4, the CSRF ordering wait in E6, the reload's one-task wait and 2.5 s fallback in E7, the 10 s connect wait in E10) are bounded and allowed; no repeating timers (`coding-standards.md`, R34)
 
 ## 4. Claim and Takeover
 
@@ -122,9 +122,15 @@ No decision uses a clock time from the files: devices' clocks differ (seconds ap
 - No lease, or the lease is released → **automatic claim** (steps 1–6, no click), at most once per tab between successful loads (a `sessionStorage` mark prevents a reload loop). The mark is cleared when a load becomes holder, and when the automatic claim ends without a reload (parked, lost race), so a later load in that tab can claim a free lease again
 - Otherwise → parked (`held`). Lease or marker unreadable → parked (`unreadable`)
 
-**Reopen the chat** (R10, R30): after a reload that follows any claim (Use here or automatic), once ST fires `APP_READY` and the page is holder, read `active` and open it with ST's context functions: group → `openGroupChat(groupId, chatFile)` **(verify)**; character → `selectCharacterById(index of avatar)` **(verify)**, then `openCharacterChat(chatFile)` **(verify)** if that chat isn't already open. A character or group that no longer exists → stay on ST's start screen (logged). While the reopen flag is set, ST's startup `CHAT_CHANGED` with no chat doesn't overwrite `active`.
+**Reopen the chat** (R10, R30): after a reload that follows any claim (Use here, automatic or onForeground), once ST fires `APP_READY` and the page is holder, open the `active` the lease held when this load became holder, with ST's context functions (`SillyTavern.getContext()`, read fresh each time: it returns a snapshot), the same steps as ST's own "open recent chat":
 
-**Recording the open chat:** on `CHAT_CHANGED` the holder writes `active` (E3; skipped when unchanged).
+- **Character:** `selectCharacterById(index of avatar)`, then `openCharacterChat(chatFile)` if `chatId` isn't that chat. Only if the character really is selected afterwards: ST skips the switch while a save or a reply runs, and `openCharacterChat` would then change the wrong character's chat
+- **Group → stays on ST's start screen** (logged). ST's `openGroupChat` needs the group already selected, and the function that selects it (`openGroupById`) isn't in ST's context; the lease imports no ST modules. The app reopens groups through its own `chatFile` route (E13)
+- A character that no longer exists → start screen (logged)
+- The reopen flag (`sessionStorage`) is read and removed when the page loads, so only the load right after the claim reopens; a load that ends up parked reopens nothing
+- While the reopen is pending (from the load until it is over), `CHAT_CHANGED` doesn't write `active`: ST's startup chat changes (none, or ST's own Auto-load chat) would overwrite the chat still to be reopened. When it is over, the chat then open is recorded; without one (start screen) `active` stays as it was
+
+**Recording the open chat:** on `CHAT_CHANGED` the holder writes `active` (E3; skipped when unchanged): `{ avatar, chatFile }` for a character, `{ groupId, chatFile }` for a group, `null` without a chat.
 
 ## 5. Release (desktop)
 
@@ -228,8 +234,12 @@ Shown by `index.js` from `tt-lease` events of type `leaseState` (E11). **Overlay
 
 ST connects to the model at startup only when its **Auto-connect** option is on (`power_user.auto_connect`, off by default). After a takeover reload the user would otherwise land in their chat unable to generate (R36; seen on desktop and in the app).
 
-- After a reload that follows **Use here** or the app's `onForeground()` claim (not the automatic claim at start: that page was never connected in this session, and ST's own Auto-connect decides), once `APP_READY` has fired and the page is holder: if ST's `onlineStatus` is `no_connection`, the page presses ST's own connect button for the selected API, once: the same buttons ST's auto-connect presses (`#api_button`, `#api_button_novel`, `#api_button_textgenerationwebui`, `#api_button_openai`, chosen by `main_api`) **(verify)**
+- After a reload that follows **Use here** or the app's `onForeground()` claim (not the automatic claim at start: that page was never connected in this session, and ST's own Auto-connect decides), once `APP_READY` has fired and the page is holder: if ST's `onlineStatus` is `no_connection`, the page presses ST's own connect button for the selected API, once: the same buttons ST's auto-connect presses (`RA_autoconnect`), chosen by `main_api`: `kobold` → `#api_button`, `novel` → `#api_button_novel`, `textgenerationwebui` → `#api_button_textgenerationwebui`, `openai` → `#api_button_openai`. Any other API (e.g. `koboldhorde`) has none: nothing is pressed, the wait below still decides
+- Already connected (e.g. ST's own Auto-connect got there first): nothing is pressed
+- **End of ST's attempt:** ST's `ONLINE_STATUS_CHANGED` to anything but `no_connection` (connected), or else a bounded wait of **10 s** after the press, then ST's `onlineStatus` decides. ST fires no event when an attempt fails (the status stays `no_connection`), and some failures send no request at all, so the wait is the only end it has
 - Still not connected after ST's own attempt: the page reports `leaseNotice` `notConnected` (E11). Desktop shows one toast, "Not connected to a model. Connect in API Connections."; the app shows its native notice (A7) until `leaseState.connected` turns `true`
+- `leaseState.connected` follows ST's `onlineStatus` (set at `APP_READY` and on every `ONLINE_STATUS_CHANGED`), on every page, not only after a takeover
+- Reopening the chat (E4) doesn't wait for the connection
 - Never changes ST's settings (doesn't turn Auto-connect on)
 
 ## 11. App Contract *(shared)*
@@ -359,6 +369,8 @@ The app's own `window.__ttBridge` is not part of this contract.
 | Chrome's automatic (proactive) discards may skip the `freeze` event (not tested; the test install's `chrome://discards` allowed only an urgent discard after a manual freeze) | A tab discarded that way still leaves no marker: the next page needs **Use here** | Investigate if seen; release stays best effort |
 | A reply can't move to another device | A takeover waits for the reply (up to 60 s), then reloads | — |
 | Horde text replies are asynchronous: `/api/horde/generate-text` only submits the job, the reply comes from later `/api/horde/task-status` polls (E15) | `busy` covers only the submit, so a takeover doesn't wait for a Horde reply; the old page's polls and chat save are held once it parks, and the reply is lost on the old device (never data) | Track Horde's polling, or a server plugin |
+| Group chats aren't reopened after a takeover (ST's context has no function that selects a group; E4) | The desktop page lands on ST's start screen; the lease keeps the group in `active`. The app reopens groups through its own `chatFile` route | A group-select function in ST's context, or a dynamic import of ST's `group-chats.js` (owner decision) |
+| ST's Custom (OpenAI-compatible) chat completion source bypasses its status check (`onlineStatus` "Status check bypassed") | After a takeover the page counts as connected even with the model down: no `notConnected` notice; the first reply fails in ST as usual | — (ST's own behavior) |
 | A failed `busy: false` on a holder that then goes idle (no further lease write or check to carry it) | One claimer can wait the full 60 s cap | Server plugin, or the holder retrying on its next activity (already the rule, E3) |
 
 ## 14. Tests
@@ -375,11 +387,13 @@ The app's own `window.__ttBridge` is not part of this contract.
 - `busy`: the generation request is sent only after `busy: true` is confirmed; a failed `busy: true` → request rejected with `AbortError`, never sent, toast; any `/api/backends/*/generate` matches; cleared only when the body is fully read or the stream closes, on error and on cancel, never when the headers arrive; dry runs never set it; overlapping generations
 - Release: marker on `pagehide` and on `freeze` (desktop only); resume after `freeze`: unchanged pair → bump, verify, holder without a reload; pair changed (before or during the grace) → `lost`; unreadable → `unreadable`; requests wait for the check; `resume` after a `pagehide` release is ignored and `pageshow` reloads; a parked page's `freeze` / `resume` do nothing
 - Messages: `leaseState`, `leaseInfo` and `leaseNotice` payloads, to the app and as `tt-lease` with `type`; no CSRF token or ST data in any message
+- Reopen: the flag read once per load and removed; only a holder after a claim reopens; character selected, chat opened only if different and only if the selection happened; group and deleted character → start screen, `active` kept; `CHAT_CHANGED` not recorded while pending, the open chat recorded after; `active` write failures and pair changes as in E3
+- Connect: pressed only after Use here / onForeground and only while `no_connection`; button by `main_api`, none for other APIs; `notConnected` after the 10 s wait, not when ST connects first; `connected` tracks `ONLINE_STATUS_CHANGED`; hooks attached at once (desktop) or on `load` (document start)
 
 **Manual checklist, on the separate test install only** (never the install in daily use: `ai-guidelines.md`). Throwaway persona, lorebook, character and chat; Memory Books installed. Delete any lease files the spike left before starting.
 
 - [ ] Two pages: the second parks; a stale page's chat, persona, card, lorebook and settings saves never reach the server
-- [ ] Use here: same chat reopened; switch time recorded
+- [ ] Use here: same chat reopened; switch time recorded. A group and a deleted character: start screen, logged. With ST's Auto-load chat on: the reopened chat wins
 - [ ] Two simultaneous Use here: exactly one holder
 - [ ] Takeover while generating: claimer waits, reply saved before it loads. No model connected: no stuck `busy`
 - [ ] Save queued just before a takeover: held, or saved and visible in the new holder
@@ -395,7 +409,7 @@ The app's own `window.__ttBridge` is not part of this contract.
 - [ ] Lease write `EPERM` (Windows): retried, no false park
 - [ ] Unknown `format` in the lease file: page parks with the update message, writes nothing
 - [ ] Untested ST version: toast once, every request checked
-- [ ] Model connection restored after a Use here reload; not pressed after an automatic claim at start
+- [ ] Model connection restored after a Use here reload; not pressed after an automatic claim at start. A backend that can't connect (not the Custom source, which bypasses its check): one `notConnected` toast within about 10 s
 - [ ] The app's checks: app spec checklist
 
 ## 15. Verified in SillyTavern's source
@@ -410,4 +424,6 @@ Checked against the tags **1.19.0 and 1.19.1** (2026-11-20). Between them only `
 - **WebSockets and other channels (R31):** no WebSocket server in `src` (the `ws` dependency isn't imported), no `new WebSocket`, `EventSource`, `sendBeacon`, workers or service worker in `public` outside `public/lib`; streaming uses `EventSourceStream` over fetch bodies; `<form method="post">` elements use `action="javascript:void(null)"`. Memory Books and TopInfoBar on the test install: none either
 - **`GET /version`** answers `{ agent, pkgVersion, gitRevision, gitBranch, commitDate, isLatest }` (behind the login check)
 - **Generation endpoints (E8):** `src/server-startup.js` mounts `/api/backends/text-completions`, `/api/backends/kobold`, `/api/backends/chat-completions`, `/api/novelai` and `/api/horde` (same lines in 1.19.0 and 1.19.1); each has `POST /generate` (Horde: `/generate-text`). Other `/generate` routes are images, voice or video (`/api/sd/*`, `/api/novelai/generate-image`, `/api/azure/generate` is Azure TTS, `/api/speech/*`) and stay off the list. Every caller in `public/scripts` (`script.js` `sendGenerationRequest`, `openai.js`, `textgen-settings.js`, `kai-settings.js`, `nai-settings.js`, `custom-request.js`, `horde.js`) reads the response body to the end (`json()`, `text()` on errors, or `pipeThrough` of the stream), so `busy: false` follows; Stop aborts the fetch, which errors the stream
+- **Reopen (E4)** (2026-11-21; `script.js`, `group-chats.js`, `st-context.js`, `welcome-screen.js` identical in 1.19.0 and 1.19.1): `getContext()` exposes `selectCharacterById`, `openCharacterChat`, `openGroupChat`, `getCurrentChatId`, `characters`, `groups`, `characterId`, `groupId`, `chatId`, `onlineStatus`, `mainApi`, `eventSource`, `eventTypes`; it builds a new object on every call. `selectCharacterById(id)` returns without switching while `isChatSaving` or a reply runs. `openCharacterChat(file)` sets `characters[this_chid].chat` and saves the card (as when the user picks a chat). `openGroupChat(groupId, chatId)` doesn't select the group; ST's own callers (`openRecentGroupChat`, `/go`, auto-load) call `openGroupById` first, which isn't in the context. `globalThis.SillyTavern` is set before `script.js` waits for `load`; `APP_READY` and `APP_INITIALIZED` are auto-fired for late listeners. Events: `APP_READY` `app_ready`, `CHAT_CHANGED` `chat_id_changed`, `ONLINE_STATUS_CHANGED` `online_status_changed` (emitted only when the status changes)
+- **Connect buttons (E10)** (2026-11-21; `RossAscends-mods.js`, `index.html` identical in 1.19.0 and 1.19.1): `RA_autoconnect` presses `#api_button` (kobold), `#api_button_novel`, `#api_button_textgenerationwebui`, `#api_button_openai`; no case for `koboldhorde`. All four are `<div>`s with jQuery click handlers. A failed attempt sets `no_connection` again (no event); some failures send no request (e.g. no endpoint). ST's auto-load and auto-connect start in `initRossMods` before `APP_READY` and aren't awaited. The Custom chat completion source sets "Status check bypassed" before its request
 - **Horde is asynchronous:** `/api/horde/generate-text` only submits the job and answers its id; the reply comes from repeated `POST /api/horde/task-status` polls (`horde.js`), so `busy` covers only the submit
