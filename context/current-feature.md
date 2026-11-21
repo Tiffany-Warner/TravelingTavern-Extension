@@ -2,7 +2,7 @@
 
 ## Session Lease `v0.2.0`
 
-**Status:** Slices 1–3 merged into `dev`; next: slice 4 (`feature/lease-overlay`)
+**Status:** Slices 1–3 merged into `dev`; slice 4 (`feature/lease-overlay`) pushed for review
 **Spec:** `context/specs/ext-0.2-session-lease-spec.md` (E1–E14). App side: TravelingTavern's `session-lease-app-spec.md` (A1–A10)
 **Requirements and evidence:** `context/decisions/session-lease-spike.md` (R1–R44)
 
