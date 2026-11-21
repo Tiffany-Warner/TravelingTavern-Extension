@@ -19,7 +19,9 @@ Prove or disprove that one active SillyTavern page at a time ("Use here" session
     - before a reload, abort only held chat saves; leave held reads pending
     - bounded lease-write retry: on a failed write, re-read the lease; if holder and epoch are still ours, stay holder and retry after ~100–200 ms; park only if the claim changed or the lease can't be read
     - added: release marker on tab close (`pagehide`), requests wait for the start decision, a holder restored from the back/forward cache parks and reloads
-3. [ ] **Part 2 (the app) on the test install:** hold first requests at document start, foreground takeover, park while the desktop holds the lease, release in the background
+3. [ ] **Part 2 (the app) on the test install:**
+    - [x] stage 1, the app with no app changes (results in `session-lease-spike.md`): safe, but the app gives no native sign it is parked; phone switch about 6 s
+    - [ ] stage 2, app spike code on a local `spike/session-lease` branch in the app repo, built as a separate app (`.spike` applicationId) pointed only at the test install: lease at document start, foreground takeover only when released, native parked state on every screen with native actions blocked up front, release in the background (also with JavaScript paused; a killed app leaves the desktop on Use here), then takeover while generating between app and desktop
 4. [ ] **Spec** from the requirements in `session-lease-spike.md`, with `coding-standards.md` updated for one-off delays
 
 ### Notes

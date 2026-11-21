@@ -49,6 +49,21 @@ The spike ran on the SillyTavern install in daily use, with throwaway persona / 
 - Switch time (1 s grace, click to reopened chat): 3.2–3.3 s
 - **Release timing:** the marker is written on `pagehide`, not `beforeunload`. `pagehide` fires only when the page really leaves (after a "Leave site?" prompt is accepted; a cancelled prompt releases nothing). It also fires when the page enters the back/forward cache, hence the v4.2 fix
 
+## Part 2, stage 1: the app with no app changes
+
+TravelingTavern app (debug build) on the Pixel 8, pointed at the test install over Tailscale; the extension's spike code (v4.2) runs inside the app's WebView.
+
+| Check | Result |
+|---|---|
+| App's WebView runs the lease | Pass: claimed a released lease without a click; reopened the chat after a takeover |
+| Desktop takes over → app parks | Pass for data safety: the app parks on its next request; held requests never reached the server |
+| App shows it is parked | Fail: native screens keep their last data with no sign; the bridge's refresh is held silently. The overlay appears only inside the chat screen |
+| Overlay in the app's chat screen | Partial: **Use here** works, but a Memory Books popup underneath shows through the backdrop |
+| **Use here** from the phone | Pass, but 5.7 s to ready and 6.0 s to the reopened chat (desktop 3.3 s) |
+
+- **Pre-request lease check from the Pixel over Tailscale:** 11–49 ms, one 123 ms; about 27 checks on page load
+- Not run in stage 1: native writes while parked, takeover while generating between app and desktop (need app code: stage 2)
+
 ## Findings
 
 - **False park of the real holder:** `/api/files/upload` answered 500 on a lease metadata write right after a takeover reload (seen 4 times, reproduced). Server error: `EPERM: operation not permitted, rename 'tt-session-lease.json.<n>' -> 'tt-session-lease.json'` from `write-file-atomic` (`renameSync`, no retry). Windows refuses to rename over a file another handle has open (a concurrent lease read, or a virus scanner on the fresh file). Transient
@@ -74,7 +89,7 @@ The session lease protects every data type tested with one rule and no knowledge
 2. **Parked = hold.** Server-data requests (`/api/…`, `/user/…`, any non-GET) are held, never refused; static files load
 3. **Before a reload, abort only held chat saves** (so `isChatSaving` clears and `beforeunload` doesn't block). Leave held reads pending, so no extension sees a failed read and writes a default file. No held request is ever sent
 4. **A page becomes writable only through a fresh load that holds the lease.** A page that lost the lease never re-claims by itself
-5. **Re-read the lease before every write.** Reads may trust a read up to 2 s old; decide on an allowlist of read-only endpoints that skip the check after measuring from the Pixel over Tailscale
+5. **Re-read the lease before every write.** Reads may trust a read up to 2 s old (see 21 for read-only endpoints)
 6. **Claim:** wait for `busy` to clear (with timeout), write `epoch + 1`, wait the grace period (1 s), re-read, require holder **and** epoch to be ours, reload
 7. **Lease writes retry on failure:** re-read; if holder and epoch are still ours, stay holder and retry a bounded number of times, ~100–200 ms apart; park only if the claim changed or the lease can't be read. Write the lease less often (skip an unchanged `active`). A failed `busy: true` write is not metadata: don't start the generation, or tell the user
 8. **`busy` ignores dry runs**
@@ -90,3 +105,7 @@ The session lease protects every data type tested with one rule and no knowledge
 18. **Requests made before the start decision wait for it:** sent if the page turns out to be holder, held if parked (never held for good in a holder page)
 19. **`busy` must not stick after a generation that fails before it starts** (no end event): decide how the holder clears it, or how a claimer recognizes a stale `busy` without polling. The 60 s limit caps it until then
 20. **After a takeover reload, the model connection must be restored or the user told how.** On the phone every takeover is a reload; without a connection the user takes over a chat and can't generate a reply. The spec decides which (e.g. reconnect after a takeover reload, or require ST's auto-connect and say so); don't rely on auto-connect being on
+21. **Allowlist of read-only endpoints** that skip the pre-request check in the holder (still held while parked). From the Pixel each check costs 11–49 ms and ST sends about 27 POST requests on load, most of them reads. Every listed endpoint is confirmed read-only in ST's source; anything not listed is checked
+22. **Phone switch time needs a timing breakdown before the spec:** **Use here** in the app takes about 6 s to the reopened chat (desktop 3.3 s). Measure claim, grace, reload, ST startup and chat reopen separately
+23. **The app shows the parked state natively on every screen** and blocks native actions (+, send) up front while parked, never leaving them on a held request. Found in stage 1: the native screens keep stale data with no sign while the WebView is parked
+24. **Only one lease write in flight at a time** (one queue for claims, epoch bumps and `busy` / `active` updates). Otherwise an update that read the lease before a returning holder's epoch bump can write the old epoch back, and the holder's release marker counts again (found while building stage 2; worst case another page takes over without a click)
