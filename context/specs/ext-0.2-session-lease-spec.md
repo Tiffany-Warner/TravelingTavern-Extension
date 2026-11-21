@@ -113,6 +113,7 @@ No decision uses a clock time from the files: devices' clocks differ (seconds ap
 **Start decision** (every page load; requests wait for it, E6):
 
 - Lease names this page's id: a refresh, or a duplicated tab that copied `sessionStorage`. **Always bump the epoch** to `(own id, epoch + 1)` and verify (pair rule, E2) before becoming holder. The newest load with that id wins; an older page with the same id fails its next pair check and parks
+- **A duplicated tab** bumps the epoch like a refresh, so it takes over from the original without a click, and the original parks at its next write. This is intended: it prevents two holders with the same page id
 - No lease, or the lease is released → **automatic claim** (steps 1–6, no click), at most once per tab between successful loads (a `sessionStorage` mark prevents a reload loop)
 - Otherwise → parked (`held`). Lease or marker unreadable → parked (`unreadable`)
 
