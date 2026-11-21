@@ -1,6 +1,6 @@
 # TravelingTavern Extension `v0.2.0` — Session Lease
 
-> **Reviewed** (2026-11-20). Items marked **(verify)** must be confirmed in SillyTavern's source before they're built on.
+> **Reviewed** 2026-11-20; updated 2026-11-21 (overlay review, freeze/resume). Items marked **(verify)** must be confirmed in SillyTavern's source before they're built on.
 
 Replaces `ext-0.1-save-guard-spec.md` (superseded). Requirements: `context/decisions/session-lease-spike.md` (cited as **R1–R44**). Requirement map: `session-lease-spike.md` → Requirement Map (final). App side: the TravelingTavern repo's `session-lease-app-spec.md`, which references this spec for every shared definition and never restates it.
 
@@ -200,12 +200,13 @@ Shown by `index.js` from `tt-lease` events of type `leaseState` (E11). **Overlay
 
 **Design**
 
-- A modern **centered card** on a **dimmed, blurred backdrop** (`::backdrop` with a translucent dark tint and `backdrop-filter: blur(var(--blurStrength))`)
+- A modern **centered card** on a **dimmed, blurred backdrop** (`::backdrop` with a translucent dark tint and `backdrop-filter: blur(var(--SmartThemeBlurStrength))`, ST's `--blurStrength` in px)
 - Card: rounded corners (about 16 px), soft shadow, comfortable padding, max width about 360 px, full width minus margins on narrow windows
 - Content, top to bottom: a clear **title**, **one line** of text, then a **large, full-width, rounded "Use here" button**
-- While claiming (`claiming`, `waitingForReply`): a **spinner** replaces the button. Under `prefers-reduced-motion: reduce` the spinner doesn't rotate (a static indicator instead)
+- While claiming (`claiming`, `waitingForReply`): a **spinner** replaces the button. Under `prefers-reduced-motion: reduce`, and under ST's own **Reduced Motion** setting (ST's `reduced-motion` class on `body`), the spinner doesn't rotate (a static indicator instead) and the card's fade-in is off
 - **Colors from ST's theme variables** (confirmed in ST 1.19.1 `public/style.css`), so it matches the user's theme: card background `--SmartThemeBlurTintColor`, text `--SmartThemeBodyColor`, border `--SmartThemeBorderColor`, shadow `--SmartThemeShadowColor`, spinner accent `--SmartThemeQuoteColor`, font size `--mainFontSize`, transitions `--animation-duration`
-- The button **builds on ST's `menu_button` class** (theme colors and border) with overrides only for size: full width, larger padding, larger radius, larger text (`menu_button` defaults to `width: min-content` and `border-radius: 5px`)
+- The button **builds on ST's `menu_button` class** with overrides for size (full width, larger padding, larger radius, larger text; `menu_button` defaults to `width: min-content` and `border-radius: 5px`) and for contrast: a **soft accent fill** (`color-mix(in srgb, var(--SmartThemeQuoteColor) 25%, var(--SmartThemeBlurTintColor))`), an accent border (`--SmartThemeQuoteColor`), text in `--SmartThemeBodyColor`, and a **stronger tint on hover and keyboard focus** (40%), which outranks ST's own `menu_button` focus fill
+- **Focus:** the card takes the focus when the overlay opens (and when it's re-raised), not the button, so the button shows its focus tint only once tabbed to (Chrome ignores `autofocus` on the dialog)
 - **Static markup built with DOM methods** (`createElement`, `textContent`); no HTML strings, no data in markup, no external fonts or assets. Styles in one `<style>` element the extension adds once, every rule scoped to the overlay's own class prefix
 - No other change to ST's look
 
@@ -330,14 +331,14 @@ The app's own `window.__ttBridge` is not part of this contract.
 ### What the contract never does
 
 - Pass ST data, the CSRF token or anything from chats, cards, lorebooks or settings to the app. Messages carry only the fields above
-- Offer a way to turn the lease off, skip the wrapper, or make a parked page writable without a claim and a fresh load
+- Offer a way to turn the lease off, skip the wrapper, or make a parked page writable without a claim and a fresh load (the one internal exception is resume after a freeze, E7)
 - Log content: logs carry the kind of event, the reason, endpoint paths and counts only
 
 ## 12. Version Check
 
 - `TESTED_ST_VERSIONS` in `session-lease.js`: the ST versions this lease was tested against, starting with **1.19.0 and 1.19.1** (the spike). Read from ST's `/version` at start
 - The lease depends on ST's endpoint names in only three places: the allowlist (E6), the chat-save paths aborted before a reload (E7) and the generation endpoints (E8). Everything else is held or checked whatever its name
-- **Untested ST version:** the allowlist is turned off (every request is checked: slower, never less safe); `leaseInfo.untestedServer` is `true`; desktop (`index.js`, from the `leaseInfo` event) shows one toast per ST version: "TravelingTavern hasn't been tested with this SillyTavern version." Chat-save and generation paths stay as they are: if ST renamed them, a reload may show "Leave site?" or a takeover may not wait for a reply, and the checklist (E14) catches both before the version is added
+- **Untested ST version:** the allowlist is turned off (every request is checked: slower, never less safe); `leaseInfo.untestedServer` is `true`; desktop (`index.js`, from the `leaseInfo` event) shows one toast, without a title: "TravelingTavern hasn't been tested with this SillyTavern version." Only on a holder page (on a parked page it would sit behind the overlay), once per ST version per browser (the version shown is remembered in `localStorage`; if storage is blocked, it shows again on the next load). Chat-save and generation paths stay as they are: if ST renamed them, a reload may show "Leave site?" or a takeover may not wait for a reply, and the checklist (E14) catches both before the version is added
 - On every ST release: re-check the three lists in ST's source, run the checklist on the test install, then add the version
 
 ## 13. Known Limits
