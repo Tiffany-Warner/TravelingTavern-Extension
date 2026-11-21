@@ -2,7 +2,7 @@
 
 ## Session-Lease Spike
 
-**Status:** Part 1 (desktop) done; part 2 (app) next, on a separate test install
+**Status:** Part 1 (desktop) done and its fixes re-checked on the test install; part 2 (app) next
 **Branch:** `spike/session-lease` (from `dev`; local, throwaway, never merges)
 **Plan:** `context/decisions/direction-change.md` (Spike section). Background: `context/decisions/architecture-assessment.md`
 **Results:** `context/decisions/session-lease-spike.md` (results, incident, verdict, requirements for the spec)
@@ -13,13 +13,12 @@ Prove or disprove that one active SillyTavern page at a time ("Use here" session
 
 ### Next, in order
 
-1. [ ] **Separate SillyTavern test install** (user is setting it up): own folder, data and port. Every manual test, spike and cleanup runs there; no unreleased guard or lease code in the install in daily use
-2. [ ] **Three fixes on `spike/session-lease`:**
+1. [x] **Separate SillyTavern test install:** own folder, data and port (1.19.1, fresh data, Memory Books installed, reachable over Tailscale on its own port). Every manual test, spike and cleanup runs there; no unreleased guard or lease code in the install in daily use
+2. [x] **Fixes on `spike/session-lease`, re-checked on the test install** (v4 `dda4e79`, v4.1 `2943387`, v4.2 `a3d6189`; results in `session-lease-spike.md`):
     - the wrapper exempts nothing (lease I/O uses the original `fetch`)
     - before a reload, abort only held chat saves; leave held reads pending
-    - bounded lease-write retry, so the holder doesn't falsely park during part 2: on a failed write, re-read the lease; if holder and epoch are still ours, stay holder and retry after ~100–200 ms; park only if the claim changed or the lease can't be read
-
-    Then re-run the affected part 1 checks on the test install
+    - bounded lease-write retry: on a failed write, re-read the lease; if holder and epoch are still ours, stay holder and retry after ~100–200 ms; park only if the claim changed or the lease can't be read
+    - added: release marker on tab close (`pagehide`), requests wait for the start decision, a holder restored from the back/forward cache parks and reloads
 3. [ ] **Part 2 (the app) on the test install:** hold first requests at document start, foreground takeover, park while the desktop holds the lease, release in the background
 4. [ ] **Spec** from the requirements in `session-lease-spike.md`, with `coding-standards.md` updated for one-off delays
 
