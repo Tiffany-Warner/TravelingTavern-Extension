@@ -2,7 +2,7 @@
 
 ## Session Lease `v0.2.0`
 
-**Status:** Slices 1–4 merged into `dev`; next: release on `freeze` (`fix/lease-freeze-release`), then slice 5 (`feature/lease-busy`)
+**Status:** Slices 1–4 and the `freeze` release fix merged into `dev`; next: slice 5 (`feature/lease-busy`)
 **Spec:** `context/specs/ext-0.2-session-lease-spec.md` (E1–E14). App side: TravelingTavern's `session-lease-app-spec.md` (A1–A10)
 **Requirements and evidence:** `context/decisions/session-lease-spike.md` (R1–R44)
 
@@ -53,6 +53,12 @@ An idle background holder tab closed without a release marker, twice (likely Chr
 - The TravelingTavern app is blocked on `v0.2.0-rc.1`
 
 ## History
+
+### 2026-11-21 — Lease release on `freeze`; resume checks the pair
+- A desktop holder also releases on the Page Lifecycle `freeze` (a frozen tab may be discarded, which fires no `pagehide`). On `resume` it runs the app's foreground holder check: unchanged pair → bump, verify, holder again without a reload; changed → `lost`; unreadable → `unreadable`; requests wait for it. Back/forward cache keeps park-and-reload
+- Cause: an idle background holder tab closed without a marker, twice. A reload on every resume was rejected (Chrome freezes background tabs routinely; unsent text would be lost); E7 notes the one exception to "writable only through a fresh load"
+- Gotchas: `chrome://discards` greyed out Proactive Discard for the frozen tab, only Urgent Discard worked; a page's own `fetch` is held once it released (use the files on disk to check)
+- Verified against SillyTavern 1.19.1 in Chrome on the separate test install (freeze, resume, freeze + urgent discard, next tab claims, the `lost` case); unverified: proactive discards (may skip `freeze`, E13). `LEASE_VERSION` 1
 
 ### 2026-11-21 — Session lease slice 4: overlay and toasts
 - `index.js`: modal `<dialog>` card from `leaseState` (texts per reason, Use here / Reload / spinner), ST theme variables, re-raised over ST popups, Escape can't close it; toasts from `leaseInfo` (untested ST version, once per version via `localStorage`, holder only) and `leaseNotice`, no title
