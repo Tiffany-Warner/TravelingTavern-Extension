@@ -41,19 +41,67 @@
         lostRace: 'lostRace',
         unreadable: 'unreadable',
         unknownFormat: 'unknownFormat',
+        reloadPending: 'reloadPending',
     });
 
     /** Page phases. A page leaves `deciding` once; it becomes holder only through the start decision. */
     const PHASE = Object.freeze({ deciding: 'deciding', holder: 'holder', parked: 'parked' });
 
     /** What started a claim; stored in the reopen flag (spec E4, E10). */
-    const CLAIM_KIND = Object.freeze({ automatic: 'automatic', useHere: 'useHere' });
+    const CLAIM_KIND = Object.freeze({ automatic: 'automatic', useHere: 'useHere', foreground: 'foreground' });
 
     /** Claim grace: a write the old holder already sent lands before this page loads (spec E4). */
     const GRACE_MS = 1000;
     /** The claim's wait for `busy`: re-read once per second for at most 60 s (spec E4, the one polling exception). */
     const BUSY_WAIT_INTERVAL_MS = 1000;
     const BUSY_WAIT_MAX_MS = 60000;
+
+    /** A holder trusts a lease read this old for GETs and allowlisted reads (spec E6). */
+    const READ_WINDOW_MS = 2000;
+    /** ST's own `/csrf-token` waits at most this long for the lease's token fetch (spec E6). */
+    const CSRF_ORDER_MAX_WAIT_MS = 2000;
+    /** A page still alive this long after its reload was asked for parks as `reloadPending` (spec E7). */
+    const RELOAD_FALLBACK_MS = 2500;
+
+    /** ST versions this lease was tested against (spec E12). The allowlist is off on any other. */
+    const TESTED_ST_VERSIONS = Object.freeze(['1.19.0', '1.19.1']);
+
+    const CSRF_TOKEN_PATH = '/csrf-token';
+    const VERSION_PATH = '/version';
+    /** ST's login page: the lease never installs there (spec E11). */
+    const LOGIN_PATH = '/login';
+
+    /**
+     * Read-only POST endpoints that skip the holder's pre-request check (spec E6). Each confirmed in ST
+     * 1.19.0 and 1.19.1 (spec E15). `*` is one path segment. Still held while parked.
+     */
+    const READ_ALLOWLIST = Object.freeze([
+        '/api/settings/get',
+        '/api/characters/all',
+        '/api/characters/get',
+        '/api/groups/all',
+        '/api/chats/get',
+        '/api/chats/group/get',
+        '/api/chats/recent',
+        '/api/worldinfo/get',
+        '/api/avatars/get',
+        '/api/backgrounds/folders',
+        '/api/image-metadata/all',
+        '/api/secrets/read',
+        '/api/stats/get',
+        '/api/sd/comfy/workflows',
+        '/api/tokenizers/*/encode',
+        '/api/tokenizers/*/count',
+    ]);
+
+    /** Chat saves: the only held requests aborted before a reload (spec E7, E15). */
+    const CHAT_SAVE_PATHS = Object.freeze(['/api/chats/save', '/api/chats/group/save']);
+
+    /** Messages (spec E11). */
+    const MESSAGE_VERSION = 1;
+    const APP_LISTENER = 'TravelingTavern';
+    const DESKTOP_EVENT = 'tt-lease';
+    const LOG_PREFIX = '[TravelingTavern]';
 
     /** sessionStorage keys (per tab, per origin). */
     const STORAGE_KEYS = Object.freeze({
@@ -384,6 +432,196 @@
     }
 
     /**
+     * Pathname of a fetch or XHR target, lower-cased and without trailing slashes (Express routing
+     * ignores both), so a variant spelling can't slip past the wrapper.
+     * @param {string|URL|Request} input fetch input or XHR URL.
+     * @returns {string} Normalized pathname, or '' if it can't be parsed.
+     */
+    function requestPath(input) {
+        const raw = typeof input === 'string' ? input : (input && typeof input.url === 'string' ? input.url : String(input));
+        try {
+            return new URL(raw, 'http://localhost/').pathname.toLowerCase().replace(/\/+$/, '');
+        } catch (error) {
+            return '';
+        }
+    }
+
+    /**
+     * HTTP method of a fetch call, upper-cased (init overrides a Request's, as fetch does).
+     * @param {string|URL|Request} input fetch input.
+     * @param {RequestInit} [init] fetch options.
+     * @returns {string} Method.
+     */
+    function requestMethod(input, init) {
+        if (init && init.method) return String(init.method).toUpperCase();
+        if (input && typeof input === 'object' && typeof input.method === 'string') return input.method.toUpperCase();
+        return 'GET';
+    }
+
+    /**
+     * The AbortSignal of a fetch call, if any (init overrides a Request's).
+     * @param {string|URL|Request} input fetch input.
+     * @param {RequestInit} [init] fetch options.
+     * @returns {AbortSignal|null} Signal.
+     */
+    function requestSignal(input, init) {
+        if (init && init.signal) return init.signal;
+        if (input && typeof input === 'object' && input.signal) return input.signal;
+        return null;
+    }
+
+    /**
+     * Server data (spec E6): a path under `/api/` or `/user/`, or any method other than GET.
+     * @param {string} path Normalized pathname.
+     * @param {string} method Upper-case method.
+     * @returns {boolean} True when the wrapper must decide about the request.
+     */
+    function isServerData(path, method) {
+        return method !== 'GET' || /(^|\/)(api|user)(\/|$)/.test(path);
+    }
+
+    /**
+     * Whether a path is an endpoint pattern (`*` = one segment). A prefix before it is allowed (ST
+     * behind a reverse-proxy subpath).
+     * @param {string} path Normalized pathname.
+     * @param {string} pattern Endpoint pattern starting with '/'.
+     * @returns {boolean} True on a match.
+     */
+    function matchesEndpoint(path, pattern) {
+        const parts = path.split('/');
+        const want = pattern.split('/');
+        const offset = parts.length - want.length;
+        if (offset < 0) return false;
+        for (let i = 1; i < want.length; i++) {
+            const part = parts[offset + i];
+            if (!part || (want[i] !== '*' && want[i] !== part)) return false;
+        }
+        return true;
+    }
+
+    /** Whether a path is on the read allowlist (spec E6). */
+    function isAllowlisted(path) {
+        return READ_ALLOWLIST.some((pattern) => matchesEndpoint(path, pattern));
+    }
+
+    /** Whether a path is a chat save (spec E7). */
+    function isChatSave(path) {
+        return CHAT_SAVE_PATHS.some((pattern) => matchesEndpoint(path, pattern));
+    }
+
+    /** Whether a request is ST's own CSRF token request (spec E6, ordering). */
+    function isCsrfTokenRequest(path, method) {
+        return method === 'GET' && matchesEndpoint(path, CSRF_TOKEN_PATH);
+    }
+
+    /**
+     * Whether a page is ST's login page (spec E11): URL pathname ending in `/login`, compared
+     * lower-case with trailing slashes ignored. The query string is not part of the pathname.
+     * @param {string} pathname `location.pathname`.
+     * @returns {boolean} True on the login page.
+     */
+    function isLoginPage(pathname) {
+        return matchesEndpoint(String(pathname).toLowerCase().replace(/\/+$/, ''), LOGIN_PATH);
+    }
+
+    /**
+     * What the wrapper does with a server-data request (spec E6).
+     * @param {object} input
+     * @param {string} input.phase The page's phase.
+     * @param {string} input.method Upper-case method.
+     * @param {boolean} input.allowlisted On the allowlist, with the allowlist on.
+     * @param {number} input.readAgeMs Age of the holder's last confirming lease read.
+     * @returns {'wait'|'hold'|'send'|'check'} Wait for the start decision; hold; send; or re-read the
+     *     lease first.
+     */
+    function decideRequest({ phase, method, allowlisted, readAgeMs }) {
+        if (phase === PHASE.deciding) return 'wait';
+        if (phase !== PHASE.holder) return 'hold';
+        if ((method === 'GET' || allowlisted) && readAgeMs <= READ_WINDOW_MS) return 'send';
+        return 'check';
+    }
+
+    /**
+     * Held requests (spec E6, E7): only each one's path and reject function are kept, never the
+     * request, so no code path can send one later.
+     * @param {() => Error} makeAbortError Makes the AbortError a rejected request gets.
+     * @returns {{ add: Function, abortChatSaves: Function, size: Function }} The registry.
+     */
+    function createHeldRegistry(makeAbortError) {
+        const held = new Set();
+        return {
+            /**
+             * Keeps a held request's path and reject function.
+             * @returns {() => void} Removes the entry (e.g. when its own signal aborts).
+             */
+            add(path, reject) {
+                const entry = { path, reject };
+                held.add(entry);
+                return () => { held.delete(entry); };
+            },
+            /**
+             * Before a reload: rejects held chat saves with an AbortError; held reads stay pending.
+             * @returns {number} How many were aborted.
+             */
+            abortChatSaves() {
+                let count = 0;
+                for (const entry of Array.from(held)) {
+                    if (!isChatSave(entry.path)) continue;
+                    held.delete(entry);
+                    entry.reject(makeAbortError());
+                    count++;
+                }
+                return count;
+            },
+            size: () => held.size,
+        };
+    }
+
+    /**
+     * Holds a fetch (spec E6): a promise that stays pending. Its own signal aborting rejects it with an
+     * AbortError and removes it from the registry, so it can never be sent.
+     * @param {object} held Registry from createHeldRegistry.
+     * @param {string} path Normalized pathname.
+     * @param {AbortSignal|null} signal The request's signal.
+     * @param {() => Error} makeAbortError Makes an AbortError.
+     * @returns {Promise<never>} Never resolves.
+     */
+    function holdFetch(held, path, signal, makeAbortError) {
+        return new Promise((resolve, reject) => {
+            if (signal && signal.aborted) {
+                reject(makeAbortError());
+                return;
+            }
+            const onAbort = () => {
+                remove();
+                reject(makeAbortError());
+            };
+            const remove = held.add(path, (error) => {
+                if (signal) signal.removeEventListener('abort', onAbort);
+                reject(error);
+            });
+            if (signal) signal.addEventListener('abort', onAbort, { once: true });
+        });
+    }
+
+    /**
+     * The `leaseInfo` message (spec E11, E12).
+     * @param {string|null} stVersion ST's version from `/version`, or null.
+     * @param {unknown} extension `window.__ttExtension`, if any.
+     * @returns {object} Message fields.
+     */
+    function buildLeaseInfo(stVersion, extension) {
+        const ext = isObject(extension) ? extension : {};
+        return {
+            leaseVersion: LEASE_VERSION,
+            extensionVersion: typeof ext.version === 'string' ? ext.version : null,
+            extensionLeaseVersion: Number.isInteger(ext.leaseVersion) ? ext.leaseVersion : null,
+            stVersion: typeof stVersion === 'string' ? stVersion : null,
+            untestedServer: !TESTED_ST_VERSIONS.includes(stVersion),
+        };
+    }
+
+    /**
      * What a write's caller is told when every attempt failed (spec E3).
      * @param {string} kind One of WRITE_KIND.
      * @returns {{ status: 'parked', reason: string } | { status: 'failed' }} Claims and bumps park; the
@@ -656,6 +894,11 @@
             released: false,
             startPromise: null,
             lastReport: '',
+            /** When a lease read last confirmed this holder's pair (`now()` ms). */
+            verifiedAt: -Infinity,
+            checkPromise: null,
+            /** ST's version from `/version`; null until read. The allowlist is on only for tested ones. */
+            stVersion: null,
         };
 
         /** ISO timestamp for the informational fields. */
@@ -694,6 +937,7 @@
             page.phase = PHASE.parked;
             page.reason = reason;
             page.pair = null;
+            page.verifiedAt = -Infinity;
             log('info', 'parked', { reason });
             report();
             return { status: 'parked', reason };
@@ -709,6 +953,7 @@
             page.reason = null;
             page.pair = pair;
             page.heldEpoch = pair.epoch;
+            page.verifiedAt = now();
             storageRemove(STORAGE_KEYS.autoClaimed);
             log('info', 'holder', { epoch: pair.epoch });
             report();
@@ -847,7 +1092,8 @@
          *     The outcome.
          */
         function useHere() {
-            if (page.phase !== PHASE.parked || page.claiming || page.released || page.reason === PARK_REASON.unknownFormat) {
+            const noUseHere = page.reason === PARK_REASON.unknownFormat || page.reason === PARK_REASON.reloadPending;
+            if (page.phase !== PHASE.parked || page.claiming || page.released || noUseHere) {
                 return Promise.resolve({ status: 'ignored' });
             }
             return claim(CLAIM_KIND.useHere);
@@ -871,6 +1117,18 @@
         }
 
         /**
+         * The reload after a claim didn't happen (e.g. ST's `beforeunload` cancelled it, spec E7). The page
+         * stays parked, never stuck in `claiming`: it reports `reloadPending`, whose control reloads from a
+         * click. No new claim: the fresh load decides (spec E4).
+         * @returns {void}
+         */
+        function reloadPending() {
+            page.claiming = false;
+            log('warn', 'reload did not happen');
+            park(PARK_REASON.reloadPending);
+        }
+
+        /**
          * `pageshow` from the back/forward cache (spec E5). A page that released its claim parks at once
          * and must reload; the fresh load decides again.
          * @returns {{ reload: boolean }} Whether the glue reloads the page.
@@ -882,20 +1140,189 @@
             return { reload: true };
         }
 
+        // ---- Requests and the app's hooks (spec E6, E11) ---------------------------------------
+
+        /** Records ST's version (spec E12); the allowlist is on only for a tested version. */
+        function setStVersion(version) {
+            page.stVersion = typeof version === 'string' ? version : null;
+            if (!TESTED_ST_VERSIONS.includes(page.stVersion)) log('warn', 'untested SillyTavern version: allowlist off');
+        }
+
+        /** Whether the allowlist applies now. */
+        function allowlistOn() {
+            return TESTED_ST_VERSIONS.includes(page.stVersion);
+        }
+
+        /**
+         * The wrapper's decision for a request right now, without waiting (spec E6).
+         * @param {string} path Normalized pathname.
+         * @param {string} method Upper-case method.
+         * @returns {'wait'|'hold'|'send'|'check'} See decideRequest.
+         */
+        function decideNow(path, method) {
+            return decideRequest({
+                phase: page.phase,
+                method,
+                allowlisted: allowlistOn() && isAllowlisted(path),
+                readAgeMs: now() - page.verifiedAt,
+            });
+        }
+
+        /**
+         * Decides a server-data request (spec E6): waits for the start decision, then sends, holds, or
+         * re-reads the lease first. A lease bug holds, never sends.
+         * @param {string} path Normalized pathname.
+         * @param {string} method Upper-case method.
+         * @returns {Promise<'send'|'hold'>} The verdict.
+         */
+        async function gate(path, method) {
+            try {
+                await start();
+                const verdict = decideNow(path, method);
+                if (verdict === 'send' || verdict === 'hold') return verdict;
+                return (await checkHolder()) ? 'send' : 'hold';
+            } catch (error) {
+                failed('request gate', error);
+                return 'hold';
+            }
+        }
+
+        /**
+         * The holder's lease check before a request (spec E6). Concurrent checks share one read. A
+         * pending `busy: false` is written with it (spec E3). Fails closed: unreadable parks.
+         * @returns {Promise<boolean>} True when still holder.
+         */
+        function checkHolder() {
+            if (page.phase !== PHASE.holder) return Promise.resolve(false);
+            if (!page.checkPromise) {
+                page.checkPromise = runCheck(true)
+                    .catch((error) => { failed('lease check', error); return false; })
+                    .finally(() => { page.checkPromise = null; });
+            }
+            return page.checkPromise;
+        }
+
+        /**
+         * One lease check.
+         * @param {boolean} mayRepeat Re-run once if the page's own pair changed meanwhile (its epoch bump).
+         * @returns {Promise<boolean>} True when still holder.
+         */
+        async function runCheck(mayRepeat) {
+            const pair = page.pair;
+            if (state.pendingBusyClear) {
+                const outcome = await updateLease(pair, {});
+                if (outcome.status === 'parked') {
+                    park(outcome.reason);
+                    return false;
+                }
+                if (outcome.status !== 'failed' && holdsPair(page.pair, pair)) {
+                    page.verifiedAt = now();
+                    return true;
+                }
+            }
+            // Through the write queue, so it never reads a write (e.g. a foreground bump) whose outcome
+            // the page hasn't processed yet.
+            const read = await enqueue(() => readLease());
+            if (page.phase !== PHASE.holder) return false;
+            if (!holdsPair(page.pair, pair)) return mayRepeat ? runCheck(false) : false;
+            const verified = decideVerify(read, pair, PARK_REASON.lost);
+            if (!verified.ok) {
+                park(verified.reason);
+                return false;
+            }
+            page.verifiedAt = now();
+            return true;
+        }
+
+        /**
+         * The app returned to the foreground (spec E11, app A5). Holder: confirm the lease, bump the epoch
+         * if its release marker matches, else park. Parked: claim only if the lease is released or gone.
+         * @returns {Promise<{ status: string }>} holder, parked, reload (after a claim) or ignored.
+         */
+        async function onForeground() {
+            try {
+                if (page.phase === PHASE.holder) return await foregroundHolder();
+                const canClaim = page.phase === PHASE.parked && !page.claiming && !page.released
+                    && page.reason !== PARK_REASON.unknownFormat && page.reason !== PARK_REASON.reloadPending;
+                return canClaim ? await foregroundParked() : { status: 'ignored' };
+            } catch (error) {
+                return failed('foreground', error);
+            }
+        }
+
+        /** Whether the page is still holder of exactly this pair (after an await). */
+        function stillHolds(pair) {
+            return page.phase === PHASE.holder && holdsPair(page.pair, pair);
+        }
+
+        /** The outcome for a holder step that found the page no longer holder of its pair after an await. */
+        function notHolderAnyMore() {
+            return { status: page.phase, reason: page.reason };
+        }
+
+        /**
+         * onForeground for a holder: invalidates its own release marker with an epoch bump. Stops as soon as
+         * the page is no longer holder of the pair it started with (a check parked it meanwhile).
+         */
+        async function foregroundHolder() {
+            const pair = page.pair;
+            const [leaseRead, markerRead] = await readBoth();
+            if (!stillHolds(pair)) return notHolderAnyMore();
+            if (markerRead.kind === 'unknownFormat') return park(PARK_REASON.unknownFormat);
+            const verified = decideVerify(leaseRead, pair, PARK_REASON.lost);
+            if (!verified.ok) return park(verified.reason);
+            if (!isReleased(leaseRead, markerRead)) {
+                page.verifiedAt = now();
+                return { status: 'holder', pair };
+            }
+            const outcome = await bumpEpoch(pair, {});
+            if (!stillHolds(pair)) return notHolderAnyMore();
+            if (outcome.status === 'parked') return park(outcome.reason);
+            const next = { holder: pair.holder, epoch: pair.epoch + 1 };
+            page.pair = next;
+            page.heldEpoch = next.epoch;
+            report();
+            await sleep(GRACE_MS);
+            if (!stillHolds(next)) return notHolderAnyMore();
+            const read = await readLease();
+            if (!stillHolds(next)) return notHolderAnyMore();
+            const again = decideVerify(read, next, PARK_REASON.lost);
+            if (!again.ok) return park(again.reason);
+            page.verifiedAt = now();
+            log('info', 'release marker invalidated', { epoch: next.epoch });
+            return { status: 'holder', pair: next };
+        }
+
+        /** onForeground for a parked page: claims only a released or missing lease (R43). */
+        async function foregroundParked() {
+            const [leaseRead, markerRead] = await readBoth();
+            if (leaseRead.kind === 'unknownFormat' || markerRead.kind === 'unknownFormat') return park(PARK_REASON.unknownFormat);
+            if (leaseRead.kind === 'missing' || isReleased(leaseRead, markerRead)) return claim(CLAIM_KIND.foreground);
+            return { status: 'parked', reason: page.reason };
+        }
+
         return {
             readLease,
             readMarker,
             updateLease,
             bumpEpoch,
+            setStVersion,
+            decideNow,
+            gate,
+            checkHolder,
+            onForeground,
             /** Whether a failed `busy: false` is still waiting to be written. */
             hasPendingBusyClear: () => state.pendingBusyClear,
             start,
             useHere,
             release,
             restoredFromCache,
+            reloadPending,
             park,
             /** This load's holder id, `<tab id>.<load id>` (`leaseState.pageId`). */
             pageId: () => page.id,
+            /** ST's version as recorded, or null. */
+            stVersion: () => page.stVersion,
             /** A snapshot of this page's state. */
             status: () => ({
                 phase: page.phase,
@@ -931,11 +1358,292 @@
         decideWaitStep,
         decideClaim,
         decideVerify,
+        decideRequest,
+        requestPath,
+        requestMethod,
+        isServerData,
+        isAllowlisted,
+        isChatSave,
+        isCsrfTokenRequest,
+        isLoginPage,
+        createHeldRegistry,
+        holdFetch,
+        buildLeaseInfo,
+        createCsrfClient,
+        makePost,
         createSessionLease,
+        install,
+        TESTED_ST_VERSIONS,
+        READ_ALLOWLIST,
+        CHAT_SAVE_PATHS,
+        READ_WINDOW_MS,
+        CSRF_ORDER_MAX_WAIT_MS,
+        RELOAD_FALLBACK_MS,
     };
 
-    // The browser install (request wrapper, window.__ttLease: spec E6, E11) is not built yet.
+    // ---- Browser install (thin: wiring only) ---------------------------------------------------
+
+    /**
+     * The lease's own CSRF token (spec E6): fetched once through the original fetch, kept in memory
+     * only, never logged or posted. Lease POSTs carry it; a 403 fetches it again once and resends.
+     * @param {object} deps
+     * @param {Function} deps.fetch The original fetch.
+     * @param {Function} deps.setTimeout Timer for the bounded ordering wait.
+     * @param {Function} deps.clearTimeout Clears it.
+     * @param {Function} deps.log Logger.
+     * @returns {{ leaseFetch: Function, afterOwnToken: Function }} The lease's fetch, and the wait ST's
+     *     own `/csrf-token` request does before it is sent.
+     */
+    function createCsrfClient({ fetch, setTimeout, clearTimeout, log }) {
+        let token = null;
+        let pending = fetchToken();
+
+        async function fetchToken() {
+            try {
+                const response = await fetch(CSRF_TOKEN_PATH, { cache: 'no-store' });
+                const data = response.ok ? await response.json() : null;
+                token = data && typeof data.token === 'string' ? data.token : null;
+            } catch (error) {
+                token = null;
+            }
+            if (token === null) log('warn', 'CSRF token not available; lease writes will fail closed');
+        }
+
+        /** ST's `/csrf-token` waits for the lease's fetch, at most CSRF_ORDER_MAX_WAIT_MS (never held). */
+        function afterOwnToken() {
+            return new Promise((resolve) => {
+                const timer = setTimeout(resolve, CSRF_ORDER_MAX_WAIT_MS);
+                pending.then(() => { clearTimeout(timer); resolve(); });
+            });
+        }
+
+        function withToken(init) {
+            const headers = new Headers(init.headers);
+            if (token !== null) headers.set('X-CSRF-Token', token);
+            return Object.assign({}, init, { headers });
+        }
+
+        async function leaseFetch(url, init = {}) {
+            if (String(init.method || 'GET').toUpperCase() === 'GET') return fetch(url, init);
+            if (token === null) await pending;
+            const response = await fetch(url, withToken(init));
+            if (response.status !== 403) return response;
+            log('warn', 'lease write refused (403): fetching the CSRF token again');
+            pending = fetchToken();
+            await pending;
+            return fetch(url, withToken(init));
+        }
+
+        return { leaseFetch, afterOwnToken };
+    }
+
+    /** Reports to the app's listener when present, else as a `tt-lease` event for index.js (spec E11). */
+    function makePost(win) {
+        return function post(type, payload) {
+            const port = win[APP_LISTENER];
+            if (port && typeof port.postMessage === 'function') {
+                port.postMessage(JSON.stringify(Object.assign({ v: MESSAGE_VERSION, type }, payload)));
+                return;
+            }
+            win.dispatchEvent(new win.CustomEvent(DESKTOP_EVENT, { detail: Object.assign({ type }, payload) }));
+        };
+    }
+
+    /** Console logger with the lease's prefix. Callers pass events, reasons, paths and counts only. */
+    function makeLog(console) {
+        return function log(level, message, details) {
+            const write = console[level] || console.log;
+            write.call(console, LOG_PREFIX, message, details || '');
+        };
+    }
+
+    /** sessionStorage through a getter that may throw (blocked site data); the core catches errors. */
+    function pageStorage(win) {
+        return {
+            getItem: (key) => win.sessionStorage.getItem(key),
+            setItem: (key, value) => win.sessionStorage.setItem(key, value),
+            removeItem: (key) => win.sessionStorage.removeItem(key),
+        };
+    }
+
+    /** Whether this is the main frame (a cross-origin parent throws: not main). */
+    function isMainFrame(win) {
+        try {
+            return win.top === win;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    /** Wraps fetch (spec E6). The lease's own I/O keeps the original fetch. */
+    function wrapFetch(win, ctx) {
+        win.fetch = function fetch(input, init) {
+            const method = requestMethod(input, init);
+            const path = requestPath(input);
+            if (isCsrfTokenRequest(path, method)) return ctx.csrf.afterOwnToken().then(() => ctx.originalFetch(input, init));
+            if (!isServerData(path, method)) return ctx.originalFetch(input, init);
+            const signal = requestSignal(input, init);
+            const hold = () => holdFetch(ctx.held, path, signal, ctx.makeAbortError);
+            return ctx.lease.gate(path, method).then(
+                (verdict) => (verdict === 'send' ? ctx.originalFetch(input, init) : hold()),
+                hold,
+            );
+        };
+    }
+
+    /** Wraps XMLHttpRequest (spec E6): held XHRs are never sent and never complete. */
+    function wrapXhr(win, ctx) {
+        const proto = win.XMLHttpRequest && win.XMLHttpRequest.prototype;
+        if (!proto) return;
+        const targets = new WeakMap();
+        const open = proto.open;
+        const send = proto.send;
+        proto.open = function (method, url, ...rest) {
+            targets.set(this, { method: String(method).toUpperCase(), path: requestPath(String(url)), async: rest[0] !== false });
+            return open.call(this, method, url, ...rest);
+        };
+        proto.send = function (...args) {
+            const target = targets.get(this);
+            if (!target || !isServerData(target.path, target.method)) return send.apply(this, args);
+            const xhr = this;
+            const hold = () => { ctx.held.add(target.path, () => xhr.abort()); };
+            if (!target.async) {
+                // A synchronous XHR can't wait: sent only if no lease read is needed, else held.
+                if (ctx.lease.decideNow(target.path, target.method) === 'send') return send.apply(this, args);
+                return hold();
+            }
+            ctx.lease.gate(target.path, target.method).then((verdict) => {
+                if (verdict !== 'send') return hold();
+                try {
+                    send.apply(xhr, args);
+                } catch (error) {
+                    ctx.log('warn', 'XHR not sent after the lease check', { path: target.path });
+                }
+                return undefined;
+            }, hold);
+            return undefined;
+        };
+    }
+
+    /** sendBeacon can't wait for a lease check: refused (false) unless holder (spec E6). */
+    function wrapBeacon(win, ctx) {
+        const nav = win.navigator;
+        if (!nav || typeof nav.sendBeacon !== 'function') return;
+        const beacon = nav.sendBeacon;
+        nav.sendBeacon = function sendBeacon(url, data) {
+            if (ctx.lease.status().phase !== PHASE.holder) return false;
+            return beacon.call(nav, url, data);
+        };
+    }
+
+    /** Reads ST's version for the allowlist and `leaseInfo` (spec E12). */
+    async function readStVersion(originalFetch) {
+        try {
+            const response = await originalFetch(VERSION_PATH, { cache: 'no-store' });
+            const data = response.ok ? await response.json() : null;
+            return data && typeof data.pkgVersion === 'string' ? data.pkgVersion : null;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    /**
+     * Reloads the page (spec E7): aborts held chat saves, waits one task so ST's save handlers clear
+     * `isChatSaving` before its `beforeunload` runs, then reloads. A page still alive RELOAD_FALLBACK_MS
+     * later (the reload was cancelled) parks as `reloadPending`, never staying in `claiming`.
+     */
+    function reloadAfterAborts(win, lease, held, log) {
+        log('info', 'reloading', { abortedChatSaves: held.abortChatSaves() });
+        win.setTimeout(() => {
+            win.location.reload();
+            win.setTimeout(() => lease.reloadPending(), RELOAD_FALLBACK_MS);
+        }, 0);
+    }
+
+    /** Desktop release on pagehide and the back/forward-cache reload (spec E5). Not in the app's page. */
+    function wireDesktopRelease(win, lease, reloadPage) {
+        win.addEventListener('pagehide', () => { lease.release(); });
+        win.addEventListener('pageshow', (event) => {
+            if (event.persisted && lease.restoredFromCache().reload) reloadPage();
+        });
+    }
+
+    /**
+     * Runs the start decision, reads ST's version, then sends `leaseInfo` (again on every
+     * `tt-extension-ready`) (spec E11, E12).
+     */
+    function startAndReport(win, lease, post, originalFetch, afterOutcome) {
+        const version = readStVersion(originalFetch).then((stVersion) => { lease.setStVersion(stVersion); });
+        const sendLeaseInfo = () => post('leaseInfo', buildLeaseInfo(lease.stVersion(), win.__ttExtension));
+        Promise.all([lease.start().then(afterOutcome), version]).then(() => {
+            sendLeaseInfo();
+            win.addEventListener('tt-extension-ready', sendLeaseInfo);
+        });
+    }
+
+    /** The lease for this page, its CSRF client and reports wired to the window. */
+    function createPageLease(win, originalFetch, log) {
+        const csrf = createCsrfClient({
+            fetch: originalFetch,
+            setTimeout: (fn, ms) => win.setTimeout(fn, ms),
+            clearTimeout: (id) => win.clearTimeout(id),
+            log,
+        });
+        const post = makePost(win);
+        const lease = createSessionLease({
+            fetch: csrf.leaseFetch,
+            post: (type, payload) => post(type, type === 'leaseState'
+                // `connected` (spec E10) isn't tracked yet: always false.
+                ? Object.assign({}, payload, { connected: false, origin: win.location.origin })
+                : payload),
+            now: () => Date.now(),
+            sleep: (ms) => new Promise((resolve) => win.setTimeout(resolve, ms)),
+            storage: pageStorage(win),
+            log,
+        });
+        return { lease, csrf, post };
+    }
+
+    /**
+     * Installs the lease in a page: main frame only, never on ST's login page, once per page (a second
+     * copy stands down completely). `window.__ttLease` is frozen and has no off switch (spec E11).
+     * @param {Window} win The page's window.
+     * @returns {boolean} True when installed now.
+     */
+    function install(win) {
+        if (!isMainFrame(win) || isLoginPage(win.location.pathname)) return false;
+        if (Object.prototype.hasOwnProperty.call(win, '__ttLease')) return false;
+        const source = win.__ttLeaseSource === 'extension' ? 'extension' : 'app';
+        const log = makeLog(win.console);
+        const originalFetch = win.fetch.bind(win);
+        const { lease, csrf, post } = createPageLease(win, originalFetch, log);
+        const makeAbortError = () => new win.DOMException('TravelingTavern: request held while parked', 'AbortError');
+        const held = createHeldRegistry(makeAbortError);
+        const ctx = { lease, held, csrf, originalFetch, makeAbortError, log };
+        wrapFetch(win, ctx);
+        wrapXhr(win, ctx);
+        wrapBeacon(win, ctx);
+
+        const reloadPage = () => reloadAfterAborts(win, lease, held, log);
+        const afterOutcome = (outcome) => {
+            if (outcome && outcome.status === 'reload') reloadPage();
+        };
+        const api = Object.freeze({
+            version: LEASE_VERSION,
+            source,
+            useHere: () => lease.useHere().then(afterOutcome),
+            onForeground: () => lease.onForeground().then(afterOutcome),
+        });
+        Object.defineProperty(win, '__ttLease', { value: api, writable: false, configurable: false, enumerable: false });
+
+        // The app releases from Kotlin (app spec A5).
+        if (source === 'extension') wireDesktopRelease(win, lease, reloadPage);
+        startAndReport(win, lease, post, originalFetch, afterOutcome);
+        return true;
+    }
     if (typeof module !== 'undefined' && module.exports) {
         module.exports = exported;
+    } else if (typeof window !== 'undefined') {
+        install(window);
     }
 })();

@@ -2,7 +2,7 @@
 
 ## Session Lease `v0.2.0`
 
-**Status:** Slice 1 merged into `dev`; slice 2 (`feature/lease-claim`) pushed for review
+**Status:** Slices 1–3 merged into `dev`; next: slice 4 (`feature/lease-overlay`)
 **Spec:** `context/specs/ext-0.2-session-lease-spec.md` (E1–E14). App side: TravelingTavern's `session-lease-app-spec.md` (A1–A10)
 **Requirements and evidence:** `context/decisions/session-lease-spike.md` (R1–R44)
 
@@ -12,7 +12,7 @@ Build the lease from the spec in slices, each branched from `dev` with its own u
 
 ### Before slice 3 merges
 
-- [ ] **Owner: remove the extension from the SillyTavern in daily use** (it's on `dev`). From slice 3 on, `dev` carries lease code, and `dev` must never reach that install. Reinstall from `main` after `v0.2.0`
+- [x] **Owner: remove the extension from the SillyTavern in daily use** (done 2026-11-20) (it's on `dev`). From slice 3 on, `dev` carries lease code, and `dev` must never reach that install. Reinstall from `main` after `v0.2.0`
 
 ### Slices
 
@@ -22,14 +22,14 @@ Each slice: `node --test` passes; manual checks run on the test install only. `L
 |---|---|---|---|---|---|
 | 1 | `feature/lease-core` | E2, E3 | `session-lease.js` skeleton (IIFE, constants, `LEASE_VERSION`, Node export); `createSessionLease`; reading the files (404 vs unreadable, fields, `format`), released check, pair rule; write queue (one in flight), bounded retry, skip unchanged, pending `busy: false` | `files`, `pair-rule`, `writes` | None |
 | 2 | `feature/lease-claim` | E4 (claim, start decision), E5 (decisions) | Claim (busy wait ≤ 60 s, grace, verify, `lostRace`); start decision (own id → epoch bump, automatic claim once per tab); reopen flag; release marker; back/forward-cache decision | `claim`, `start-decision`, `release` | None |
-| 3 | `feature/lease-wrapper` | E6, E7, E11, E5 wiring | `install()`: `fetch`, XHR and `sendBeacon` wrappers; held requests; wait for the start decision; 2 s read window; allowlist; abort only held chat saves; frozen `window.__ttLease`, one instance per page; `leaseState` / `leaseInfo` / `leaseNotice` and `tt-lease` with `type`; `pagehide` / `pageshow`. Minimal `index.js` (`__ttLeaseSource`, `__ttExtension`, `tt-extension-ready`, loads the lease with a `<script>` element). Helpers copied from `archive/save-guard`. **Research first:** allowlist and chat-save paths in ST 1.19.0 / 1.19.1; WebSockets (R31); where lease writes get ST's CSRF header before ST's context exists (app, document start): check first whether the page can fetch `/csrf-token` itself through the original `fetch`, as Kotlin does (ST returns the session's existing token) | `wrapper`, `messages`, `instance` | Two-page test (stale chat, persona, card, lorebook, settings saves never arrive); Use here and two at once (from the console); holder refresh and duplicated tab; close the holder / an old tab; back/forward cache; no "Leave site?"; Memory Books' held reads; server unreachable; `EPERM` retry; unknown `format` |
-| 4 | `feature/lease-overlay` | E9, E12 | Overlay and its styles in `index.js`, re-raised over ST popups; toasts from `leaseInfo` and `leaseNotice`; `TESTED_ST_VERSIONS`, allowlist off on an untested version | version check (in `wrapper`) | Overlay design, light and dark theme; reduced motion; popup before / after parking; two simultaneous Use here with the buttons; untested-version toast (list narrowed locally, uncommitted) |
+| 3 | `feature/lease-wrapper` | E6, E7, E11, E5 wiring | `install()`: `fetch`, XHR and `sendBeacon` wrappers; held requests; wait for the start decision; 2 s read window; allowlist; abort only held chat saves; frozen `window.__ttLease`, one instance per page; `leaseState` / `leaseInfo` / `leaseNotice` and `tt-lease` with `type`; `pagehide` / `pageshow`; `onForeground`; `TESTED_ST_VERSIONS` and the `/version` read (allowlist on/off, `leaseInfo`). Minimal `index.js` (`__ttLeaseSource`, `__ttExtension`, `tt-extension-ready`, loads the lease with a `<script>` element). Helpers copied from `archive/save-guard`. **Research first:** allowlist and chat-save paths in ST 1.19.0 / 1.19.1; WebSockets (R31); where lease writes get ST's CSRF header before ST's context exists (app, document start): check first whether the page can fetch `/csrf-token` itself through the original `fetch`, as Kotlin does (ST returns the session's existing token) | `wrapper`, `messages`, `instance` | Two-page test (stale chat, persona, card, lorebook, settings saves never arrive); Use here and two at once (from the console); holder refresh and duplicated tab; close the holder / an old tab; back/forward cache; no "Leave site?"; Memory Books' held reads; server unreachable; `EPERM` retry; unknown `format` |
+| 4 | `feature/lease-overlay` | E9, E12 | Overlay and its styles in `index.js`, re-raised over ST popups; toasts from `leaseInfo` (untested ST version) and `leaseNotice` | version check (in `wrapper`) | Overlay design, light and dark theme; reduced motion; popup before / after parking; two simultaneous Use here with the buttons; untested-version toast (list narrowed locally, uncommitted) |
 | 5 | `feature/lease-busy` | E8 | Generation requests held until `busy: true` is confirmed; `AbortError` + `leaseNotice` `replyNotStarted` on failure; `busy: false` only when the response is over; overlapping generations. **Research first:** generation endpoints in ST's source | `busy` | Takeover while generating; no model connected: no stuck `busy`; Stop mid-stream clears `busy`; save queued just before a takeover |
 | 6 | `feature/lease-reopen` | E4 (reopen, `active`), E10 | `active` on `CHAT_CHANGED`; reopen after `APP_READY`; reconnect once after Use here only; `connected`; `leaseNotice` `notConnected`. All through `SillyTavern.getContext()`, no module imports (classic script). **Research first:** confirm the context functions and connect buttons (the (verify) items) in ST 1.19.0 / 1.19.1 | `reopen`, `connect` | Use here reopens the same chat (character and group), switch time recorded; deleted character → start screen; reconnect after Use here, not after the automatic claim |
 
 ### Order
 
-1. [ ] Slices 1–6, each merged into `dev`
+1. [ ] Slices 1–6, each merged into `dev` (1–3 done)
 2. [ ] Tag **`v0.2.0-rc.1`** on `dev`, push the tag
 3. [ ] App: its feature branch pins `v0.2.0-rc.1`; `0.1.20` implemented and tested against it (app spec checklist)
 4. [ ] `chore/release-0.2.0`: full E14 checklist on the test install against the rc; `manifest.json` → `0.2.0`; README; history entry
@@ -39,7 +39,7 @@ Each slice: `node --test` passes; manual checks run on the test install only. `L
 
 ### Archives and cleanup (ask before each delete)
 
-- `feature/save-guard`: tagged `archive/save-guard` (pushed). Delete the branch (local and remote) after slice 3 merges
+- `feature/save-guard`: tagged `archive/save-guard` (pushed); branch deleted after slice 3 (helpers ported or not needed)
 - `spike/session-lease` (both repos, local): after the release, privacy check, tag `archive/spike-session-lease`, push the tag, delete the branches
 
 ### Notes
@@ -49,6 +49,12 @@ Each slice: `node --test` passes; manual checks run on the test install only. `L
 - The TravelingTavern app is blocked on `v0.2.0-rc.1`
 
 ## History
+
+### 2026-11-20 — Session lease slice 3: request wrapper and app contract
+- `install()`: `fetch` / XHR / `sendBeacon` wrappers (held, never refused; held fetches reject on their own abort), allowlist confirmed in ST source minus `backgrounds/all`, own CSRF token with ST's `/csrf-token` ordered after it, `window.__ttLease` + `onForeground`, `leaseState` / `leaseInfo`, `tt-lease` with `type`, no install on `/login`; minimal `index.js` loader. Slices 1–2 (files, writes, claim, start decision, release) merged before it
+- Fixed after the test-install run: the takeover reload waits one task after aborting chat saves (`beforeunload` cancelled it on a clicked page), `reloadPending` if it still doesn't happen; lease checks read through the write queue
+- Gotchas: a stale holder's `pagehide` marker can overwrite the real holder's (E13, costs a click); ST's quick-reply hook times out in parked pages; `EPERM` retried as designed
+- Verified against SillyTavern 1.19.1 in Chrome on the separate test install (full slice 3 checklist incl. forced `EPERM`); unverified: a write at the exact back/forward-cache restore, Chrome's real Duplicate (simulated), the app. `LEASE_VERSION` 1
 
 <!-- One entry per completed feature / fix, 3–5 lines max: what changed, cause/key decisions, gotchas, what's unverified, version. No verification logs or test counts. Nothing private. -->
 

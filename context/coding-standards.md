@@ -19,7 +19,7 @@ One page writes, every other page holds; fail closed; stay quiet on desktop beyo
 ## Timers and Waiting
 
 - **No polling and no repeating timers.** React to events (ST's events, `pagehide` / `pageshow`, requests passing the wrapper)
-- **Bounded one-off delays are allowed:** the lease-write retry (random 100–200 ms, at most 3 attempts) and the claim's grace wait (1 s). Each has a fixed upper bound and runs once per event
+- **Bounded one-off delays are allowed:** the lease-write retry (random 100–200 ms, at most 3 attempts), the claim's grace wait (1 s) ST's `/csrf-token` waiting for the lease's own token fetch (at most 2 s), and the reload's one-task wait (`setTimeout(0)`) and its `reloadPending` fallback (2.5 s). Each has a fixed upper bound and runs once per event
 - **The single named polling exception:** the claim's wait for `busy` re-reads the lease once per second, for at most 60 s, only while a claim is in progress. No other code polls; adding another exception needs the owner's approval and a line here
 
 ## Lease Structure
