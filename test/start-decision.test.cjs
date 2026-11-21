@@ -47,7 +47,7 @@ test('lease held from this tab (refresh): bumps to this load with busy false, ve
     assert.deepStrictEqual([h.leaseFile().holder, h.leaseFile().epoch, h.leaseFile().busy], [me, 4, false]);
     assert.deepStrictEqual(h.sleeps, [GRACE_MS]);
     assert.strictEqual(h.storage.map.has(KEYS.autoClaimed), false, 'a successful load clears the automatic-claim mark');
-    assert.deepStrictEqual(h.posts, [{ type: 'leaseState', state: 'holder', reason: null, pageId: me, epoch: 4, busy: false }]);
+    assert.deepStrictEqual(h.posts, [{ type: 'leaseState', state: 'holder', reason: null, pageId: me, epoch: 4, busy: false, connected: false }]);
 });
 
 test('a previous load of this tab with a full holder id: the tab part decides', async () => {
@@ -105,7 +105,7 @@ test('another holder, not released: parked (held), nothing written', async () =>
     const h = createHarness({ files: { [LEASE]: leaseFile({ holder: 'page-b' }) } });
     assert.deepStrictEqual(await h.lease.start(), { status: 'parked', reason: 'held' });
     assert.strictEqual(h.uploads.length, 0);
-    assert.deepStrictEqual(h.posts, [{ type: 'leaseState', state: 'parked', reason: 'held', pageId: h.lease.pageId(), epoch: null, busy: false }]);
+    assert.deepStrictEqual(h.posts, [{ type: 'leaseState', state: 'parked', reason: 'held', pageId: h.lease.pageId(), epoch: null, busy: false, connected: false }]);
 });
 
 test('a stale marker (older claim) does not free the lease', async () => {
