@@ -2,7 +2,7 @@
 
 ## Session Lease `v0.2.0`
 
-**Status:** Slices 1–5 and the `freeze` release fix merged into `dev`; next: slice 6 (`feature/lease-reopen`)
+**Status:** Slices 1–5 and the `freeze` release fix merged into `dev`; slice 6 on `feature/lease-reopen`, ready to merge after review; next: tag `v0.2.0-rc.1`
 **Spec:** `context/specs/ext-0.2-session-lease-spec.md` (E1–E14). App side: TravelingTavern's `session-lease-app-spec.md` (A1–A10)
 **Requirements and evidence:** `context/decisions/session-lease-spike.md` (R1–R44)
 
@@ -33,7 +33,7 @@ An idle background holder tab closed without a release marker, twice (likely Chr
 
 ### Order
 
-1. [ ] Slices 1–6, each merged into `dev` (1–5 done)
+1. [ ] Slices 1–6, each merged into `dev` (1–5 done; 6 ready to merge)
 2. [ ] Tag **`v0.2.0-rc.1`** on `dev`, push the tag
 3. [ ] App: its feature branch pins `v0.2.0-rc.1`; `0.1.20` implemented and tested against it (app spec checklist)
 4. [ ] `chore/release-0.2.0`: full E14 checklist on the test install against the rc; `manifest.json` → `0.2.0`; README; history entry
@@ -53,6 +53,12 @@ An idle background holder tab closed without a release marker, twice (likely Chr
 - The TravelingTavern app is blocked on `v0.2.0-rc.1`
 
 ## History
+
+### 2026-11-21 — Session lease slice 6: reopen and reconnect after a takeover
+- After a claim's reload the holder reopens the lease's character chat through `SillyTavern.getContext()` (select, then open the chat only if the selection happened); `CHAT_CHANGED` records `active`, not while a reopen is pending. After Use here / onForeground only, a page with `no_connection` presses ST's connect button once (not while ST is already connecting), then `notConnected` after `ONLINE_STATUS_CHANGED` or a 10 s wait; `leaseState.connected` tracks ST
+- Groups stay on the start screen (owner decision: ST's context can't select a group; the app reopens groups by its `chatFile` route). E13: Auto-load can win the race, a chat deleted outside ST is started again empty, the Custom source bypasses its status check
+- Gotchas: Claude in Chrome's console log repeats a page's lines when it switches back to that tab (no second load); a Text Completion type on the test install held a real saved key, removed
+- Verified against SillyTavern 1.19.1 in Chrome on the separate test install (character reopen, group and deleted character → start screen, automatic claim, Auto-load on, reconnect, `notConnected` toast); switch time about 4–5 s (rough, whole-second timestamps); unverified: Auto-load with a different chat, the app. `LEASE_VERSION` 1
 
 ### 2026-11-21 — Session lease slice 5: `busy` from generation requests
 - Generation requests (`/api/backends/*/generate`, NovelAI, Horde text) are sent only after `busy: true` is confirmed; overlapping replies share it; `busy: false` once the last response is over (body read, closed, error or Stop, never at the headers). A `busy: true` that can't be written rejects the request with `AbortError` and `leaseNotice` `replyNotStarted`. Endpoints and ST's full body reads confirmed in 1.19.0 / 1.19.1
