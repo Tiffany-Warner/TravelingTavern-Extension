@@ -1,6 +1,6 @@
 'use strict';
 
-// Release on pagehide and the back/forward cache (spec E5).
+// Release on pagehide or freeze, the back/forward cache, and the check on resume after a freeze (spec E5).
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -87,6 +87,57 @@ test('back/forward cache: a page that never released does not reload', async () 
     const h = createHarness({ files: { [LEASE]: leaseFile({ holder: 'page-b' }) } });
     await h.lease.start();
     assert.deepStrictEqual(h.lease.restoredFromCache(), { reload: false });
+});
+
+test('resume after freeze, lease unchanged: bumps the epoch, verifies, holds again without a reload', async () => {
+    const h = await holderHarness();
+    const id = h.lease.pageId();
+    await h.lease.release('freeze');
+    assert.deepStrictEqual([h.markerFile().holder, h.markerFile().epoch], [id, 4]);
+    const outcome = await h.lease.resumeAfterFreeze();
+    assert.deepStrictEqual(outcome, { status: 'holder', pair: { holder: id, epoch: 5 } });
+    assert.deepStrictEqual([h.leaseFile().holder, h.leaseFile().epoch], [id, 5]);
+    assert.ok(h.sleeps.includes(1000), 'grace before the verify');
+    assert.deepStrictEqual(h.posts.at(-1), { type: 'leaseState', state: 'holder', reason: null, pageId: id, epoch: 5, busy: false });
+});
+
+test('resume after freeze, another page claimed meanwhile: parks as lost and writes nothing', async () => {
+    const h = await holderHarness();
+    await h.lease.release('freeze');
+    h.setFile(LEASE, leaseFile({ holder: 'page-b.load', epoch: 5 }));
+    const leaseWrites = h.leaseUploads().length;
+    assert.deepStrictEqual(await h.lease.resumeAfterFreeze(), { status: 'parked', reason: 'lost' });
+    assert.strictEqual(h.leaseUploads().length, leaseWrites);
+    assert.deepStrictEqual([h.leaseFile().holder, h.leaseFile().epoch], ['page-b.load', 5]);
+    assert.strictEqual(h.posts.at(-1).reason, 'lost');
+});
+
+test('resume after freeze, lease unreadable: parks as unreadable and writes nothing', async () => {
+    const h = await holderHarness();
+    await h.lease.release('freeze');
+    h.server.readStatus.set(LEASE, 500);
+    const leaseWrites = h.leaseUploads().length;
+    assert.deepStrictEqual(await h.lease.resumeAfterFreeze(), { status: 'parked', reason: 'unreadable' });
+    assert.strictEqual(h.leaseUploads().length, leaseWrites);
+});
+
+test('resume after freeze, a claim lands during the grace: the verify parks as lost', async () => {
+    const h = await holderHarness();
+    await h.lease.release('freeze');
+    h.server.onSleep = (ms) => { if (ms === 1000) h.setFile(LEASE, leaseFile({ holder: 'page-b.load', epoch: 5 })); };
+    assert.deepStrictEqual(await h.lease.resumeAfterFreeze(), { status: 'parked', reason: 'lost' });
+});
+
+test('resume is ignored after a pagehide release (the back/forward cache reloads) and for a parked page', async () => {
+    const h = await holderHarness();
+    await h.lease.release('pagehide');
+    assert.deepStrictEqual(await h.lease.resumeAfterFreeze(), { status: 'ignored' });
+    assert.deepStrictEqual(h.lease.restoredFromCache(), { reload: true });
+
+    const parked = createHarness({ files: { [LEASE]: leaseFile({ holder: 'page-b' }) } });
+    await parked.lease.start();
+    assert.strictEqual(await parked.lease.release('freeze'), false);
+    assert.deepStrictEqual(await parked.lease.resumeAfterFreeze(), { status: 'ignored' });
 });
 
 test('a marker that failed to send is reported false', async () => {

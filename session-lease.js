@@ -890,8 +890,13 @@
             /** The epoch held in this load, kept after parking (`leaseState.epoch`). */
             heldEpoch: null,
             claiming: false,
-            /** Set by release(): the claim was given up as the page left (back/forward cache). */
+            /** Set by release(): the claim was given up on `pagehide` or `freeze` (spec E5). */
             released: false,
+            /** What released the claim (`pagehide` or `freeze`) and the pair given up; read on `resume`. */
+            releasedOn: null,
+            releasedPair: null,
+            /** The check after `resume` (spec E5); requests wait for it. */
+            resumePromise: null,
             startPromise: null,
             lastReport: '',
             /** When a lease read last confirmed this holder's pair (`now()` ms). */
@@ -1100,14 +1105,18 @@
         }
 
         /**
-         * Release on `pagehide` (spec E5): a holder writes the marker naming its exact pair, with
-         * `keepalive`, and holds everything from then on. Never touches the lease. Reports nothing: the
-         * page is leaving (or entering the back/forward cache).
+         * Release on `pagehide` or `freeze` (spec E5): a holder writes the marker naming its exact pair,
+         * with `keepalive`, and holds everything from then on. Never touches the lease. Reports nothing:
+         * the page is leaving, entering the back/forward cache, or being frozen (and maybe discarded). The
+         * request is sent before the first `await`, so it goes out even if the page runs no further task.
+         * @param {'pagehide'|'freeze'} [cause] What released the claim; a `freeze` is checked on `resume`.
          * @returns {Promise<boolean>} True when ST accepted the marker; false when not holder or it failed.
          */
-        function release() {
+        function release(cause = 'pagehide') {
             if (page.phase !== PHASE.holder) return Promise.resolve(false);
             const marker = markerFor(page.pair, timestamp());
+            page.releasedPair = page.pair;
+            page.releasedOn = cause;
             page.phase = PHASE.parked;
             page.reason = PARK_REASON.held;
             page.pair = null;
@@ -1138,6 +1147,44 @@
             log('info', 'restored from the back/forward cache after releasing');
             park(PARK_REASON.held);
             return { reload: true };
+        }
+
+        /**
+         * `resume` after a `freeze` (spec E5): the same check as the app's foreground holder path. A page
+         * that released on `freeze` re-reads the lease and the marker; if the lease still holds its exact
+         * pair (no other page claimed), it bumps the epoch (invalidating its own marker), verifies after
+         * the grace (pair rule) and is holder again, without a reload. Pair changed → `lost`; unreadable →
+         * `unreadable`. Requests wait for the check (gate). Anything else (not released, or released on
+         * `pagehide`) is ignored: the back/forward cache reloads on `pageshow`.
+         * @returns {Promise<{ status: string }>} holder, parked or ignored.
+         */
+        function resumeAfterFreeze() {
+            if (page.resumePromise) return page.resumePromise;
+            if (!page.released || page.releasedOn !== 'freeze') return Promise.resolve({ status: 'ignored' });
+            const pair = page.releasedPair;
+            page.released = false;
+            page.releasedOn = null;
+            page.releasedPair = null;
+            page.resumePromise = runResume(pair)
+                .catch((error) => failed('resume', error))
+                .finally(() => { page.resumePromise = null; });
+            return page.resumePromise;
+        }
+
+        /** The resume check's steps (spec E5): verify the pair, bump, grace, verify again. */
+        async function runResume(pair) {
+            const [leaseRead, markerRead] = await readBoth();
+            if (markerRead.kind === 'unknownFormat') return park(PARK_REASON.unknownFormat);
+            const verified = decideVerify(leaseRead, pair, PARK_REASON.lost);
+            if (!verified.ok) return park(verified.reason);
+            const outcome = await bumpEpoch(pair, {});
+            if (outcome.status === 'parked') return park(outcome.reason);
+            const next = { holder: pair.holder, epoch: pair.epoch + 1 };
+            await sleep(GRACE_MS);
+            const again = decideVerify(await readLease(), next, PARK_REASON.lost);
+            if (!again.ok) return park(again.reason);
+            log('info', 'resumed after freeze', { epoch: next.epoch });
+            return becomeHolder(next);
         }
 
         // ---- Requests and the app's hooks (spec E6, E11) ---------------------------------------
@@ -1178,6 +1225,7 @@
         async function gate(path, method) {
             try {
                 await start();
+                if (page.resumePromise) await page.resumePromise;
                 const verdict = decideNow(path, method);
                 if (verdict === 'send' || verdict === 'hold') return verdict;
                 return (await checkHolder()) ? 'send' : 'hold';
@@ -1317,6 +1365,7 @@
             useHere,
             release,
             restoredFromCache,
+            resumeAfterFreeze,
             reloadPending,
             park,
             /** This load's holder id, `<tab id>.<load id>` (`leaseState.pageId`). */
@@ -1560,12 +1609,21 @@
         }, 0);
     }
 
-    /** Desktop release on pagehide and the back/forward-cache reload (spec E5). Not in the app's page. */
+    /**
+     * Desktop release (spec E5): on `pagehide`, and on the Page Lifecycle `freeze` (a frozen tab may be
+     * discarded, which fires no `pagehide`). On `resume` a page that released on `freeze` checks the lease
+     * and holds again if no other page claimed; a back/forward-cache restore (`pageshow`) reloads. Not in
+     * the app's page: the app releases from Kotlin.
+     */
     function wireDesktopRelease(win, lease, reloadPage) {
-        win.addEventListener('pagehide', () => { lease.release(); });
+        win.addEventListener('pagehide', () => { lease.release('pagehide'); });
         win.addEventListener('pageshow', (event) => {
             if (event.persisted && lease.restoredFromCache().reload) reloadPage();
         });
+        const doc = win.document;
+        if (!doc || typeof doc.addEventListener !== 'function') return;
+        doc.addEventListener('freeze', () => { lease.release('freeze'); });
+        doc.addEventListener('resume', () => { lease.resumeAfterFreeze(); });
     }
 
     /**

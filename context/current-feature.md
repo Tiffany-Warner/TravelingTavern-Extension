@@ -27,6 +27,10 @@ Each slice: `node --test` passes; manual checks run on the test install only. `L
 | 5 | `feature/lease-busy` | E8 | Generation requests held until `busy: true` is confirmed; `AbortError` + `leaseNotice` `replyNotStarted` on failure; `busy: false` only when the response is over; overlapping generations. **Research first:** generation endpoints in ST's source | `busy` | Takeover while generating; no model connected: no stuck `busy`; Stop mid-stream clears `busy`; save queued just before a takeover |
 | 6 | `feature/lease-reopen` | E4 (reopen, `active`), E10 | `active` on `CHAT_CHANGED`; reopen after `APP_READY`; reconnect once after Use here only; `connected`; `leaseNotice` `notConnected`. All through `SillyTavern.getContext()`, no module imports (classic script). **Research first:** confirm the context functions and connect buttons (the (verify) items) in ST 1.19.0 / 1.19.1 | `reopen`, `connect` | Use here reopens the same chat (character and group), switch time recorded; deleted character → start screen; reconnect after Use here, not after the automatic claim |
 
+### Fix before slice 5: release on `freeze` (`fix/lease-freeze-release`)
+
+An idle background holder tab closed without a release marker, twice (likely Chrome freezing, then discarding it: a discarded tab never fires `pagehide`). E5: a holder also releases on the Page Lifecycle `freeze`; on `resume` it runs the app's foreground holder check (unchanged pair → bump the epoch, verify, holder again without a reload; changed → `lost`; unreadable → `unreadable`; requests wait for it). E7 notes this one exception to "writable only through a fresh load". The back/forward cache keeps park-and-reload. Desktop only. E13 row updated. Unit tests in `release` and `instance`; manual check with `chrome://discards` (freeze, then discard, the holder).
+
 ### Order
 
 1. [ ] Slices 1–6, each merged into `dev` (1–4 done)
