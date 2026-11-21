@@ -92,12 +92,69 @@ test('a retry parks at once when the pair changed meanwhile', async () => {
     assert.strictEqual(h.leaseFile().holder, 'page-b');
 });
 
-test('a retry parks at once when the lease became unreadable', async () => {
+test('an unreadable re-read is retried like a failed write', async () => {
+    const h = holderHarness();
+    h.server.failLeaseReads = 2;
+    const outcome = await h.lease.updateLease(PAIR, { busy: true });
+    assert.strictEqual(outcome.status, 'written');
+    assert.strictEqual(h.uploads.length, 1);
+    assert.strictEqual(h.sleeps.length, 2);
+    assert.ok(h.sleeps.every((ms) => ms >= RETRY_MIN_MS && ms <= RETRY_MAX_MS));
+});
+
+test('a missing (404) re-read is retried like a failed write', async () => {
+    const h = holderHarness();
+    h.server.missingLeaseReads = 1;
+    assert.strictEqual((await h.lease.updateLease(PAIR, { busy: true })).status, 'written');
+    assert.strictEqual(h.sleeps.length, 1);
+});
+
+test('unreadable on every attempt: parks (unreadable) after the last, whatever the write type', async () => {
+    for (const changes of [{ busy: true }, { busy: false }, { active: null }]) {
+        const h = holderHarness();
+        h.server.readStatus.set(LEASE, 500);
+        assert.deepStrictEqual(await h.lease.updateLease(PAIR, changes), { status: 'parked', reason: 'unreadable' });
+        assert.strictEqual(h.sleeps.length, WRITE_ATTEMPTS - 1);
+        assert.strictEqual(h.uploads.length, 0);
+    }
+    const h = holderHarness();
+    h.server.readStatus.set(LEASE, 500);
+    assert.deepStrictEqual(await h.lease.bumpEpoch(PAIR), { status: 'parked', reason: 'unreadable' });
+    assert.strictEqual(h.sleeps.length, WRITE_ATTEMPTS - 1);
+});
+
+test('missing on every attempt: parks (lost) after the last', async () => {
+    const h = holderHarness();
+    h.server.missingLeaseReads = WRITE_ATTEMPTS;
+    assert.deepStrictEqual(await h.lease.updateLease(PAIR, { busy: true }), { status: 'parked', reason: 'lost' });
+    assert.strictEqual(h.sleeps.length, WRITE_ATTEMPTS - 1);
+});
+
+test('a failed write, then an unreadable re-read on the last attempt: parks (unreadable)', async () => {
+    const h = holderHarness();
+    h.server.failUploads = 2;
+    h.server.beforeUpload = () => {
+        if (h.uploads.length === 1) h.server.failLeaseReads = 1;
+    };
+    assert.deepStrictEqual(await h.lease.updateLease(PAIR, { active: null }), { status: 'parked', reason: 'unreadable' });
+    assert.strictEqual(h.uploads.length, 2);
+});
+
+test('an unreadable re-read, then a good write: written', async () => {
+    const h = holderHarness();
+    h.server.failLeaseReads = 1;
+    h.server.failUploads = 1;
+    assert.strictEqual((await h.lease.updateLease(PAIR, { busy: true })).status, 'written');
+    assert.strictEqual(h.uploads.length, 2);
+});
+
+test('an unknown format on a re-read parks at once, no retry', async () => {
     const h = holderHarness();
     h.server.failUploads = 1;
-    h.server.beforeUpload = () => { h.server.readStatus.set(LEASE, 500); };
-    assert.deepStrictEqual(await h.lease.updateLease(PAIR, { busy: true }), { status: 'parked', reason: 'unreadable' });
+    h.server.beforeUpload = () => { h.setFile(LEASE, leaseFile({ holder: 'page-a', epoch: 3, format: 2 })); };
+    assert.deepStrictEqual(await h.lease.updateLease(PAIR, { busy: true }), { status: 'parked', reason: 'unknownFormat' });
     assert.strictEqual(h.uploads.length, 1);
+    assert.strictEqual(h.sleeps.length, 1);
 });
 
 test('all attempts failed: an epoch bump parks', async () => {
@@ -114,11 +171,25 @@ test('all attempts failed: active leaves the page holder (logged)', async () => 
     assert.strictEqual(h.lease.hasPendingBusyClear(), false);
 });
 
-test('all attempts failed: busy true is reported failed (the caller does not send the request)', async () => {
+test('all attempts failed: busy true is reported failed (the caller does not send the request); busy false pending', async () => {
     const h = holderHarness();
     h.server.failUploads = 10;
     assert.deepStrictEqual(await h.lease.updateLease(PAIR, { busy: true }), { status: 'failed' });
     assert.strictEqual(h.leaseFile().busy, false);
+    assert.strictEqual(h.lease.hasPendingBusyClear(), true);
+});
+
+test('a failed busy true that landed on the last attempt is cleared by the next write', async () => {
+    const h = holderHarness();
+    h.server.failUploads = WRITE_ATTEMPTS - 1;
+    h.server.failAfterWrite = 1;
+    assert.deepStrictEqual(await h.lease.updateLease(PAIR, { busy: true }), { status: 'failed' });
+    assert.strictEqual(h.leaseFile().busy, true, 'the last attempt landed despite its error answer');
+    assert.strictEqual(h.lease.hasPendingBusyClear(), true);
+
+    assert.strictEqual((await h.lease.updateLease(PAIR, { active: null })).status, 'written');
+    assert.strictEqual(h.leaseFile().busy, false);
+    assert.strictEqual(h.lease.hasPendingBusyClear(), false);
 });
 
 test('all attempts failed: busy false stays pending and goes with the next write; the file ends busy false', async () => {

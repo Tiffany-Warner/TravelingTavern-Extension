@@ -38,7 +38,7 @@ test('a bump and a claim writing the same epoch: the pair decides', async () => 
     assert.strictEqual(h.leaseFile().holder, 'page-b');
 });
 
-test('a missing lease while holding parks as lost; unreadable parks as unreadable', async () => {
+test('a lease still missing or unreadable after every attempt parks; unknown format parks', async () => {
     const h = createHarness();
     assert.deepStrictEqual(await h.lease.updateLease({ holder: 'page-a', epoch: 3 }, { busy: true }), { status: 'parked', reason: 'lost' });
     h.setFile(LEASE, 'not json');

@@ -18,6 +18,10 @@ function createHarness({ files = {} } = {}) {
         readStatus: new Map(),
         /** Reads throw a network error while true. */
         offline: false,
+        /** Number of upcoming lease-file reads answered 500 (transient). */
+        failLeaseReads: 0,
+        /** Number of upcoming lease-file reads answered 404 (transient). */
+        missingLeaseReads: 0,
         /** Number of upcoming uploads answered 500 without writing (Windows EPERM). */
         failUploads: 0,
         /** Uploads answered 500 after writing (the write landed, the answer says it didn't). */
@@ -40,6 +44,14 @@ function createHarness({ files = {} } = {}) {
     }
 
     function answerRead(name) {
+        if (name === lease.LEASE_FILE && server.failLeaseReads > 0) {
+            server.failLeaseReads--;
+            return new Response('error', { status: 500 });
+        }
+        if (name === lease.LEASE_FILE && server.missingLeaseReads > 0) {
+            server.missingLeaseReads--;
+            return new Response('Not Found', { status: 404 });
+        }
         if (server.readStatus.has(name)) return new Response('error', { status: server.readStatus.get(name) });
         if (!server.files.has(name)) return new Response('Not Found', { status: 404 });
         return new Response(server.files.get(name), { status: 200 });

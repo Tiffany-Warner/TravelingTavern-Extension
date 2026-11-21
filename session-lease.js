@@ -176,7 +176,7 @@
      * @param {{ kind: string, lease?: object }} read Result of reading the lease.
      * @param {{ holder: string, epoch: number }} pair The holder's pair.
      * @param {{ busy?: boolean, active?: object|null }} changes Fields to set.
-     * @returns {{ action: 'write', lease: object } | { action: 'skip', lease: object } | { action: 'park', reason: string }}
+     * @returns {{ action: 'write', lease: object } | { action: 'skip', lease: object } | { action: 'park'|'retry', reason: string }}
      *     What to do.
      */
     function decideUpdate(read, pair, changes) {
@@ -196,7 +196,7 @@
      * @param {{ holder: string, epoch: number }} from The pair the bump starts from.
      * @param {{ busy?: boolean }} changes Extra fields to set with the bump.
      * @param {string} claimedAt Informational timestamp.
-     * @returns {{ action: 'write', lease: object } | { action: 'skip', lease: object } | { action: 'park', reason: string }}
+     * @returns {{ action: 'write', lease: object } | { action: 'skip', lease: object } | { action: 'park'|'retry', reason: string }}
      *     What to do.
      */
     function decideBump(read, from, changes, claimedAt) {
@@ -210,16 +210,17 @@
     }
 
     /**
-     * The park decision for a lease read that can't be built on (spec E2, E3). A missing lease while
-     * holding means this page's claim is gone.
+     * The decision for a lease read that can't be built on (spec E2, E3). An unknown format parks at
+     * once. An unreadable or missing lease may be transient, so it counts as a failed attempt and is
+     * retried; it parks only if the last attempt's read still fails (missing: this page's claim is gone).
      * @param {{ kind: string }} read Result of reading the lease.
-     * @returns {{ action: 'park', reason: string } | null} Park, or null when the lease was read.
+     * @returns {{ action: 'park'|'retry', reason: string } | null} Park or retry, or null when the lease was read.
      */
     function blockedByRead(read) {
         if (read.kind === 'ok') return null;
         if (read.kind === 'unknownFormat') return { action: 'park', reason: PARK_REASON.unknownFormat };
-        if (read.kind === 'missing') return { action: 'park', reason: PARK_REASON.lost };
-        return { action: 'park', reason: PARK_REASON.unreadable };
+        if (read.kind === 'missing') return { action: 'retry', reason: PARK_REASON.lost };
+        return { action: 'retry', reason: PARK_REASON.unreadable };
     }
 
     /**
@@ -356,7 +357,9 @@
 
         /**
          * One lease write with the bounded retry (spec E3): re-read before every attempt, decide, write.
-         * Parks at once when the decision says so; after the last failed attempt, the kind decides.
+         * Parks at once when the decision says so (pair changed, unknown format). A failed write and an
+         * unreadable or missing re-read are both failed attempts. After the last attempt: a failed read
+         * parks; a failed write leaves the outcome to the kind.
          * @param {string} kind One of WRITE_KIND.
          * @param {(read: object) => { action: string, lease?: object, reason?: string }} decide Decision
          *     for the lease just read.
@@ -364,14 +367,22 @@
          *     The outcome.
          */
         async function writeWithRetry(kind, decide) {
+            let lastReadFailure = null;
             for (let attempt = 1; attempt <= WRITE_ATTEMPTS; attempt++) {
                 if (attempt > 1) await sleep(RETRY_MIN_MS + Math.floor(Math.random() * (RETRY_MAX_MS - RETRY_MIN_MS + 1)));
                 const decision = decide(await readLease());
                 if (decision.action === 'park') return { status: 'parked', reason: decision.reason };
                 if (decision.action === 'skip') return { status: 'unchanged', lease: decision.lease };
+                if (decision.action === 'retry') {
+                    lastReadFailure = decision.reason;
+                    log('warn', 'lease re-read failed before a write', { kind, attempt, reason: decision.reason });
+                    continue;
+                }
+                lastReadFailure = null;
                 if (await uploadFile(LEASE_FILE, decision.lease)) return { status: 'written', lease: decision.lease };
                 log('warn', 'lease write failed', { kind, attempt });
             }
+            if (lastReadFailure) return { status: 'parked', reason: lastReadFailure };
             return exhaustedOutcome(kind);
         }
 
@@ -381,7 +392,7 @@
          * @param {{ holder: string, epoch: number }} pair This page's pair.
          * @param {{ busy?: boolean, active?: object|null }} changes Fields to set.
          * @returns {Promise<{ status: 'written'|'unchanged', lease: object } | { status: 'parked', reason: string } | { status: 'failed' }>}
-         *     `failed` leaves the page holder; for `busy: false` the clear stays pending.
+         *     `failed` leaves the page holder; after a failed `busy` write a `busy: false` stays pending.
          */
         function updateLease(pair, changes) {
             return enqueue(async () => {
@@ -403,10 +414,10 @@
          */
         function settlePendingBusyClear(busy, outcome) {
             if (busy === undefined) return;
-            // Landed, or no longer holder: nothing to carry. A failed `busy: true` keeps an earlier
-            // pending clear, since the file may still say `busy: true`.
-            if (outcome.status !== 'failed') state.pendingBusyClear = false;
-            else if (busy === false) state.pendingBusyClear = true;
+            // Landed, or no longer holder: nothing to carry. Any failed `busy` write leaves a clear
+            // pending: a failed `busy: true` may still have landed (error answer after the write), and
+            // no reply was started.
+            state.pendingBusyClear = outcome.status === 'failed';
         }
 
         /**

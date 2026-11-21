@@ -93,11 +93,11 @@ No decision uses a clock time from the files: devices' clocks differ (seconds ap
 ## 3. Lease Writes
 
 - **One write in flight at a time** (R24): claims, epoch bumps and `busy` / `active` updates go through one queue in the page. Otherwise an update that read the lease before an epoch bump can write the old epoch back
-- **Every update re-reads first** and writes only if the lease still holds this page's pair (E2). Pair changed → park (`lost`); unreadable → park (`unreadable`)
-- **Bounded retry** (R7): a failed write (e.g. Windows `EPERM`, answered as 500) is retried after a random 100–200 ms, at most 3 attempts in total, re-reading before each. The page parks at once if the pair changed or the lease can't be read. When all 3 attempts fail:
+- **Every update re-reads first** and writes only if the lease still holds this page's pair (E2). Pair changed → park (`lost`) at once; unknown format → park (`unknownFormat`) at once. An unreadable or missing (404) lease may be transient: it counts as a failed attempt (below)
+- **Bounded retry** (R7): a failed write (e.g. Windows `EPERM`, answered as 500) is retried after a random 100–200 ms, at most 3 attempts in total, re-reading before each. An unreadable or missing re-read is a failed attempt too, retried the same way. The page parks at once only if the pair changed or the format is unknown. If the last attempt's re-read was unreadable or missing, the page parks (`unreadable`, or `lost` for a missing lease), whatever the write type. When all 3 attempts fail at the write:
     - **claim or epoch bump** → the page isn't holder: it parks (`unreadable`)
     - **`active`** → the page stays holder; logged (only reopening the chat after a takeover is affected)
-    - **`busy: true`** → see below
+    - **`busy: true`** → see below. A `busy: false` stays pending as for `busy: false`: the failed write may still have landed (an error answer after the write), and no reply was started
     - **`busy: false`** → the page stays holder and keeps the pending `busy: false`: it is written with the holder's next lease write or lease check, until it lands, so the file never stays `busy: true` after a reply
 - **Skip unchanged writes:** no write when `busy` and `active` already have the values to be written
 - **A failed `busy: true` is not just metadata:** claimers wouldn't wait for the reply. The generation request is sent only after `busy: true` is written and confirmed (E8). If that write fails after the retry above, the request is **not sent**: the wrapper rejects it with an `AbortError` (as ST's Stop would), so ST ends the generation, and the page reports `leaseNotice` `replyNotStarted` (E11): desktop shows one toast, "Couldn't reach SillyTavern to start the reply. Try again."; the app shows its native notice (A7)
@@ -346,7 +346,7 @@ The app's own `window.__ttBridge` is not part of this contract.
 - Pair rule: claim verify; epoch-bump verify; a bump and a claim writing the same epoch
 - Claim: busy wait bounded at 60 s and skipped when released; during the wait a changed pair → `lostRace`, a release → the wait ends and the claim continues; grace; lost race; reopen flag; automatic claim at most once per tab
 - Start decision: own id → bump with `busy: false` (even if the file said `busy: true`); requests wait for the decision; duplicated tab (same id) → the older page parks on its next check
-- Writes: one in flight; re-read before each; 3 attempts 100–200 ms apart; park at once on a pair change or unreadable; unchanged writes skipped
+- Writes: one in flight; re-read before each; 3 attempts 100–200 ms apart; park at once on a pair change or unknown format; an unreadable or missing re-read retried like a failed write, parking only after the last attempt; unchanged writes skipped
 - Failed writes after all retries: claim or epoch bump → parks; `active` → stays holder; `busy: false` → stays holder, written with the next lease write or check, and the file ends `busy: false`
 - Wrapper: what counts as server data; holder vs parked; 2 s read window; allowlist on and off (untested ST); held promises never settle; only chat saves aborted before a reload; `sendBeacon` refused while parked
 - `busy`: the generation request is sent only after `busy: true` is confirmed; a failed `busy: true` → request rejected with `AbortError`, never sent, toast; any `/api/backends/*/generate` matches; cleared only when the body is fully read or the stream closes, on error and on cancel, never when the headers arrive; dry runs never set it; overlapping generations
