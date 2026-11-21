@@ -7,7 +7,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { activeFromContext, decideReopen, createStHooks } = require('../session-lease.js');
-const { createHarness, leaseFile, LEASE, KEYS } = require('./helpers/fake-server.cjs');
+const { createHarness, leaseFile, markerFile, LEASE, MARKER, KEYS } = require('./helpers/fake-server.cjs');
 const { createFakeSt, createFakeTimers, EVENT_TYPES } = require('./helpers/fake-st.cjs');
 
 const CHARACTERS = [{ avatar: 'Example Character.png' }, { avatar: 'Other Character.png' }];
@@ -122,6 +122,22 @@ test('recordChat: unchanged active isn’t written; a changed pair parks the pag
     assert.deepStrictEqual(await h.lease.recordChat({ avatar: 'Other Character.png', chatFile: 'Chat B' }), { status: 'parked', reason: 'lost' });
     assert.deepStrictEqual([h.lease.status().phase, h.lease.status().reason], ['parked', 'lost']);
     assert.strictEqual(h.leaseFile().holder, 'page-b');
+});
+
+test('active queued behind the page’s own foreground bump retries with the new pair (no false park)', async () => {
+    const h = createHarness({ files: { [LEASE]: leaseFile({ holder: 'page-a', epoch: 3 }) } });
+    assert.strictEqual((await h.lease.start()).status, 'holder');
+    const me = h.lease.pageId();
+    h.setFile(MARKER, markerFile({ holder: me, epoch: 4 }));
+    const chat = { avatar: 'Other Character.png', chatFile: 'Chat B' };
+    let record = null;
+    h.server.afterUpload = (name) => {
+        if (name === LEASE && h.leaseFile().epoch === 5 && record === null) record = h.lease.recordChat(chat);
+    };
+    assert.strictEqual((await h.lease.onForeground()).status, 'holder');
+    assert.strictEqual((await record).status, 'written');
+    assert.deepStrictEqual([h.lease.status().phase, h.lease.status().pair.epoch], ['holder', 5]);
+    assert.deepStrictEqual([h.leaseFile().holder, h.leaseFile().epoch, h.leaseFile().active], [me, 5, chat]);
 });
 
 test('recordChat: a failed write leaves the page holder (spec E3)', async () => {
