@@ -195,3 +195,38 @@ test('install at document start (the app): hooks ST on load, APP_READY already f
     const states = w.appMessages.filter((m) => m.type === 'leaseState');
     assert.strictEqual(states.at(-1).connected, true);
 });
+
+test('install at document start: getContext throws on load (ST not resumed yet), works one task later', async () => {
+    const w = createFakeWindow({ files: { [LEASE]: leaseFile({ holder: 'page-a', epoch: 3 }) }, app: true });
+    w.install();
+    const st = createFakeSt({ characterId: 0, onlineStatus: 'Valid' });
+    let calls = 0;
+    w.win.SillyTavern = {
+        getContext: () => {
+            calls += 1;
+            if (calls === 1) throw new ReferenceError("Cannot access 'chat' before initialization");
+            return st.getContext();
+        },
+    };
+    st.eventSource.emit(EVENT_TYPES.APP_READY);
+    w.fire('load');
+    assert.strictEqual(st.eventSource.count(EVENT_TYPES.CHAT_CHANGED), 0);
+    await flush();
+    assert.strictEqual(st.eventSource.count(EVENT_TYPES.CHAT_CHANGED), 1);
+    const states = w.appMessages.filter((m) => m.type === 'leaseState');
+    assert.strictEqual(states.at(-1).connected, true);
+});
+
+test('install at document start: getContext still throwing after the retry → one warning, no hooks', async () => {
+    const w = createFakeWindow({ files: { [LEASE]: leaseFile({ holder: 'page-a', epoch: 3 }) }, app: true });
+    w.install();
+    let calls = 0;
+    const warnings = [];
+    w.win.console.warn = (prefix, message) => warnings.push(message);
+    w.win.SillyTavern = { getContext: () => { calls += 1; throw new ReferenceError('not initialized'); } };
+    w.fire('load');
+    await flush();
+    assert.strictEqual(calls, 2);
+    assert.deepStrictEqual(warnings.filter((m) => m.startsWith('SillyTavern context')),
+        ['SillyTavern context not found: no reopen, no reconnect']);
+});
