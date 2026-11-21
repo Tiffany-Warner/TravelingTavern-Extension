@@ -13,7 +13,7 @@ const lease = require('../../session-lease.js');
  *     `page-a`); null for a storage that throws.
  * @returns {object} Test harness.
  */
-function createHarness({ files = {}, storage = { [lease.STORAGE_KEYS.pageId]: 'page-a' } } = {}) {
+function createHarness({ files = {}, storage = { [lease.STORAGE_KEYS.tabId]: 'page-a' } } = {}) {
     const server = {
         /** File contents by name, as text. */
         files: new Map(Object.entries(files).map(([name, value]) => [name, toText(value)])),
@@ -87,8 +87,9 @@ function createHarness({ files = {}, storage = { [lease.STORAGE_KEYS.pageId]: 'p
     }
 
     /**
-     * A page on this server: its own lease instance, sessionStorage and reports.
-     * @param {object|null} storageContent sessionStorage content, or null for a storage that throws.
+     * A page load on this server: its own lease instance, sessionStorage and reports.
+     * @param {object|null} storageContent sessionStorage content (pass the same object's entries for a
+     *     refresh in the same tab), or null for a storage that throws.
      * @returns {{ lease: object, posts: object[], storage: object }} The page.
      */
     function newPage(storageContent) {

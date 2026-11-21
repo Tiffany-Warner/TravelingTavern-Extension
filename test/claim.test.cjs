@@ -18,9 +18,9 @@ async function parkedHarness(fields = {}, files = {}) {
 test('Use here: claims epoch + 1 with busy false and active carried over, waits the grace, verifies, reloads', async () => {
     const h = await parkedHarness();
     const outcome = await h.lease.useHere();
-    assert.deepStrictEqual(outcome, { status: 'reload', pair: { holder: 'page-a', epoch: 4 } });
+    assert.deepStrictEqual(outcome, { status: 'reload', pair: { holder: h.lease.pageId(), epoch: 4 } });
     const file = h.leaseFile();
-    assert.deepStrictEqual([file.holder, file.epoch, file.busy, file.format], ['page-a', 4, false, 1]);
+    assert.deepStrictEqual([file.holder, file.epoch, file.busy, file.format], [h.lease.pageId(), 4, false, 1]);
     assert.deepStrictEqual(file.active, leaseFile().active);
     assert.deepStrictEqual(h.sleeps, [GRACE_MS]);
     assert.strictEqual(h.storage.map.get(KEYS.reopen), 'useHere');
@@ -110,7 +110,7 @@ test('another page claims between the read and the write → parked (lostRace), 
 
 test('two pages click Use here at once: exactly one holder', async () => {
     const h = await parkedHarness();
-    const other = h.newPage({ [KEYS.pageId]: 'page-c' });
+    const other = h.newPage({ [KEYS.tabId]: 'page-c' });
     await other.lease.start();
     const outcomes = await Promise.all([h.lease.useHere(), other.lease.useHere()]);
     const reloads = outcomes.filter((o) => o.status === 'reload');

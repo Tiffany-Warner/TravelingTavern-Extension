@@ -57,8 +57,8 @@
 
     /** sessionStorage keys (per tab, per origin). */
     const STORAGE_KEYS = Object.freeze({
-        /** This tab's page id, the lease's `holder` (a refresh keeps it). */
-        pageId: 'tt-lease-page-id',
+        /** This tab's id, the first part of the lease's `holder` (a refresh keeps it, a duplicated tab copies it). */
+        tabId: 'tt-lease-tab-id',
         /** Set before an automatic claim; cleared once a load becomes holder (no reload loop). */
         autoClaimed: 'tt-lease-auto-claimed',
         /** Set before a claim's reload: the CLAIM_KIND, read after the reload to reopen the chat. */
@@ -215,11 +215,12 @@
     }
 
     /**
-     * Decides an epoch bump to (own id, epoch + 1) against the lease just re-read (spec E2, E3). A lease
-     * that already holds the target pair means an earlier attempt landed despite its error answer.
+     * Decides an epoch bump to (holder, epoch + 1) against the lease just re-read (spec E2, E3). The new
+     * holder is `changes.holder` (a new load in the same tab) or stays `from.holder`. A lease that already
+     * holds the target pair means an earlier attempt landed despite its error answer.
      * @param {{ kind: string, lease?: object }} read Result of reading the lease.
      * @param {{ holder: string, epoch: number }} from The pair the bump starts from.
-     * @param {{ busy?: boolean }} changes Extra fields to set with the bump.
+     * @param {{ holder?: string, busy?: boolean }} changes Fields to set with the bump.
      * @param {string} claimedAt Informational timestamp.
      * @returns {{ action: 'write', lease: object } | { action: 'skip', lease: object } | { action: 'park'|'retry', reason: string }}
      *     What to do.
@@ -228,7 +229,7 @@
         const blocked = blockedByRead(read);
         if (blocked) return blocked;
         const lease = read.lease;
-        if (holdsPair(lease, { holder: from.holder, epoch: from.epoch + 1 })) return { action: 'skip', lease };
+        if (holdsPair(lease, { holder: changes.holder || from.holder, epoch: from.epoch + 1 })) return { action: 'skip', lease };
         if (!holdsPair(lease, from)) return { action: 'park', reason: PARK_REASON.lost };
         const next = Object.assign({}, lease, { format: LEASE_FORMAT }, changes, { epoch: lease.epoch + 1, claimedAt });
         return { action: 'write', lease: next };
@@ -252,17 +253,19 @@
      * The start decision (spec E4) from the two files read at page load.
      * @param {{ kind: string, lease?: object }} leaseRead Result of reading the lease.
      * @param {{ kind: string, marker?: object }} markerRead Result of reading the marker.
-     * @param {string} pageId This page's id.
+     * @param {string} tabId This tab's id.
      * @returns {{ action: 'bump', from: { holder: string, epoch: number } } | { action: 'claim' } | { action: 'park', reason: string }}
-     *     Own id → bump the epoch; no lease or released → automatic claim; otherwise park.
+     *     Lease held from this tab (a refresh or a duplicated tab) → bump the epoch to this load; no
+     *     lease or released → automatic claim; otherwise park.
      */
-    function decideStart(leaseRead, markerRead, pageId) {
+    function decideStart(leaseRead, markerRead, tabId) {
         if (leaseRead.kind === 'unknownFormat' || markerRead.kind === 'unknownFormat') {
             return { action: 'park', reason: PARK_REASON.unknownFormat };
         }
         if (leaseRead.kind === 'unreadable') return { action: 'park', reason: PARK_REASON.unreadable };
         if (leaseRead.kind === 'missing') return { action: 'claim' };
-        if (leaseRead.lease.holder === pageId) return { action: 'bump', from: { holder: pageId, epoch: leaseRead.lease.epoch } };
+        const lease = leaseRead.lease;
+        if (tabOf(lease.holder) === tabId) return { action: 'bump', from: { holder: lease.holder, epoch: lease.epoch } };
         if (markerRead.kind === 'unreadable') return { action: 'park', reason: PARK_REASON.unreadable };
         if (isReleased(leaseRead, markerRead)) return { action: 'claim' };
         return { action: 'park', reason: PARK_REASON.held };
@@ -348,16 +351,36 @@
     }
 
     /**
-     * A random page id. `crypto.getRandomValues` works over plain http (unlike `crypto.subtle` and
-     * `randomUUID`); Math.random is the fallback. No personal data.
-     * @returns {string} Page id.
+     * The tab part of a holder (`<tab id>.<load id>`, spec E2): everything before the first dot.
+     * @param {string} holder A lease's holder.
+     * @returns {string} Tab id.
      */
-    function makePageId() {
-        const bytes = new Uint8Array(12);
+    function tabOf(holder) {
+        const dot = holder.indexOf('.');
+        return dot === -1 ? holder : holder.slice(0, dot);
+    }
+
+    /**
+     * Whether a stored value can be a tab id: non-empty, no dot.
+     * @param {unknown} value Stored value.
+     * @returns {boolean} True for a usable tab id.
+     */
+    function isTabId(value) {
+        return isText(value) && !value.includes('.');
+    }
+
+    /**
+     * A random id in hex: tab ids and load ids. `crypto.getRandomValues` works over plain http
+     * (unlike `crypto.subtle` and `randomUUID`); Math.random is the fallback. No personal data.
+     * @param {number} byteCount Random bytes.
+     * @returns {string} Hex id.
+     */
+    function randomHex(byteCount) {
+        const bytes = new Uint8Array(byteCount);
         const source = typeof crypto !== 'undefined' && crypto && typeof crypto.getRandomValues === 'function' ? crypto : null;
         if (source) source.getRandomValues(bytes);
         else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
-        return 'p-' + Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+        return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
     }
 
     /**
@@ -563,10 +586,11 @@
         }
 
         /**
-         * Bumps the epoch to (own id, epoch + 1), from a pair this page holds or names (spec E2, E4, E5).
-         * The caller verifies the new pair afterwards (pair rule).
+         * Bumps the epoch to (holder, epoch + 1), from a pair this page holds or its tab held (spec E2,
+         * E4, E5). The caller verifies the new pair afterwards (pair rule).
          * @param {{ holder: string, epoch: number }} from The pair to bump from.
-         * @param {{ busy?: boolean }} [changes] Extra fields, e.g. `busy: false` at a fresh load.
+         * @param {{ holder?: string, busy?: boolean }} [changes] Fields to set, e.g. this load's holder and
+         *     `busy: false` at a fresh load.
          * @returns {Promise<{ status: 'written'|'unchanged', lease: object } | { status: 'parked', reason: string }>}
          *     The new lease, or park (incl. when every attempt failed).
          */
@@ -606,19 +630,21 @@
         }
 
         /**
-         * This tab's page id from sessionStorage, or a new one (kept when storage works).
-         * @returns {string} Page id.
+         * This tab's id from sessionStorage, or a new one (kept when storage works).
+         * @returns {string} Tab id.
          */
-        function loadPageId() {
-            const stored = storageGet(STORAGE_KEYS.pageId);
-            if (isText(stored)) return stored;
-            const id = makePageId();
-            if (!storageSet(STORAGE_KEYS.pageId, id)) log('warn', 'no sessionStorage: page id kept for this load only');
+        function loadTabId() {
+            const stored = storageGet(STORAGE_KEYS.tabId);
+            if (isTabId(stored)) return stored;
+            const id = 't' + randomHex(8);
+            if (!storageSet(STORAGE_KEYS.tabId, id)) log('warn', 'no sessionStorage: tab id kept for this load only');
             return id;
         }
 
+        const tabId = loadTabId();
         const page = {
-            id: loadPageId(),
+            /** This load's holder id, `<tab id>.<load id>` (spec E2): a new load id on every page load. */
+            id: tabId + '.' + randomHex(8),
             phase: PHASE.deciding,
             reason: null,
             /** The pair this page holds now (holder only). */
@@ -714,7 +740,7 @@
         /** The start decision's steps. */
         async function runStart() {
             const [leaseRead, markerRead] = await readBoth();
-            const decision = decideStart(leaseRead, markerRead, page.id);
+            const decision = decideStart(leaseRead, markerRead, tabId);
             if (decision.action === 'park') return park(decision.reason);
             if (decision.action === 'bump') return bumpAtStart(decision.from);
             if (storageGet(STORAGE_KEYS.autoClaimed) !== null) {
@@ -725,17 +751,20 @@
                 log('warn', 'automatic claim skipped: no sessionStorage');
                 return park(PARK_REASON.held);
             }
-            return claim(CLAIM_KIND.automatic);
+            const outcome = await claim(CLAIM_KIND.automatic);
+            // The mark only prevents a reload loop: a claim that ended without a reload clears it.
+            if (outcome.status !== 'reload') storageRemove(STORAGE_KEYS.autoClaimed);
+            return outcome;
         }
 
         /**
-         * A refresh or a duplicated tab: always bump the epoch with `busy: false`, then verify after the
-         * grace (pair rule, spec E2, E4). The newest load with this id wins.
-         * @param {{ holder: string, epoch: number }} from The pair in the lease.
+         * A refresh or a duplicated tab: always bump the epoch to this load's holder with `busy: false`,
+         * then verify after the grace (pair rule, spec E2, E4). The newest load in the tab wins.
+         * @param {{ holder: string, epoch: number }} from The pair in the lease (an earlier load of this tab).
          * @returns {Promise<{ status: 'holder', pair: object } | { status: 'parked', reason: string }>} The outcome.
          */
         async function bumpAtStart(from) {
-            const outcome = await bumpEpoch(from, { busy: false });
+            const outcome = await bumpEpoch(from, { holder: page.id, busy: false });
             if (outcome.status === 'parked') return park(outcome.reason);
             const pair = { holder: page.id, epoch: from.epoch + 1 };
             await sleep(GRACE_MS);
@@ -865,7 +894,7 @@
             release,
             restoredFromCache,
             park,
-            /** This page's id (the lease's `holder`). */
+            /** This load's holder id, `<tab id>.<load id>` (`leaseState.pageId`). */
             pageId: () => page.id,
             /** A snapshot of this page's state. */
             status: () => ({

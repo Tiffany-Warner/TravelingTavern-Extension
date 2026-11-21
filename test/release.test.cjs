@@ -20,7 +20,7 @@ test('the holder writes a marker naming its exact pair, with keepalive, and neve
     assert.strictEqual(await h.lease.release(), true);
     const sent = h.uploads.slice(uploadsBefore);
     assert.deepStrictEqual(sent.map((u) => [u.name, u.keepalive]), [[MARKER, true]]);
-    assert.deepStrictEqual(h.markerFile(), { format: 1, holder: 'page-a', epoch: 4, releasedAt: '2026-01-01T00:00:01.000Z' });
+    assert.deepStrictEqual(h.markerFile(), { format: 1, holder: h.lease.pageId(), epoch: 4, releasedAt: '2026-01-01T00:00:01.000Z' });
     assert.deepStrictEqual(h.leaseFile(), leaseBefore);
 });
 
@@ -52,16 +52,16 @@ test('a parked page reloading after its claim never releases', async () => {
 test('the next page claims a released lease without a click', async () => {
     const h = await holderHarness();
     await h.lease.release();
-    const next = h.newPage({ [KEYS.pageId]: 'page-b' });
-    assert.deepStrictEqual(await next.lease.start(), { status: 'reload', pair: { holder: 'page-b', epoch: 5 } });
+    const next = h.newPage({ [KEYS.tabId]: 'page-b' });
+    assert.deepStrictEqual(await next.lease.start(), { status: 'reload', pair: { holder: next.lease.pageId(), epoch: 5 } });
 });
 
 test('a refreshed holder finds its own marker matching, bumps, and the marker stops counting', async () => {
     const h = await holderHarness();
     await h.lease.release();
-    const refreshed = h.newPage({ [KEYS.pageId]: 'page-a' });
-    assert.deepStrictEqual(await refreshed.lease.start(), { status: 'holder', pair: { holder: 'page-a', epoch: 5 } });
-    const other = h.newPage({ [KEYS.pageId]: 'page-b' });
+    const refreshed = h.newPage({ [KEYS.tabId]: 'page-a' });
+    assert.deepStrictEqual(await refreshed.lease.start(), { status: 'holder', pair: { holder: refreshed.lease.pageId(), epoch: 5 } });
+    const other = h.newPage({ [KEYS.tabId]: 'page-b' });
     assert.deepStrictEqual(await other.lease.start(), { status: 'parked', reason: 'held' });
 });
 
@@ -70,8 +70,8 @@ test('an old tab closed after a takeover: its marker names its old claim; the le
     // page-b took over (epoch 5); then the old holder's tab closes.
     h.setFile(LEASE, leaseFile({ holder: 'page-b', epoch: 5 }));
     await h.lease.release();
-    assert.deepStrictEqual([h.markerFile().holder, h.markerFile().epoch], ['page-a', 4]);
-    const next = h.newPage({ [KEYS.pageId]: 'page-c' });
+    assert.deepStrictEqual([h.markerFile().holder, h.markerFile().epoch], [h.lease.pageId(), 4]);
+    const next = h.newPage({ [KEYS.tabId]: 'page-c' });
     assert.deepStrictEqual(await next.lease.start(), { status: 'parked', reason: 'held' });
 });
 
