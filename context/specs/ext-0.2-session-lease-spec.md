@@ -1,8 +1,6 @@
 # TravelingTavern Extension `v0.2.0` — Session Lease
 
-> **Reviewed** 2026-11-20; updated 2026-11-21 (overlay review, freeze/resume, reopen and reconnect verified). Items marked **(verify)** must be confirmed in SillyTavern's source before they're built on.
-
-Replaces `ext-0.1-save-guard-spec.md` (superseded). Requirements: `context/decisions/session-lease-spike.md` (cited as **R1–R44**). Requirement map: `session-lease-spike.md` → Requirement Map (final). App side: the TravelingTavern repo's `session-lease-app-spec.md`, which references this spec for every shared definition and never restates it.
+Requirements: `context/decisions/session-lease-spike.md` (cited as **R1–R44**). Requirement map: `session-lease-spike.md` → Requirement Map (final). App side: the TravelingTavern repo's `session-lease-app-spec.md`, which references this spec for every shared definition and never restates it.
 
 ## 1. Purpose and Rule
 
@@ -10,7 +8,7 @@ Replaces `ext-0.1-save-guard-spec.md` (superseded). Requirements: `context/decis
 
 **Problem:** an ST page reads data once and later saves whole files from its own copy. A page left open on one device erases what another device saved since (seen for chats, settings, lorebooks, personas and extension files).
 
-**Design: one active page per ST user.** A small lease file names the page that may write. Every other page is **parked**: it shows an overlay with **Use here**, and its requests to the server are held, never sent. Use here claims the lease and reloads the page, so it starts from fresh data. The lease needs no knowledge of which endpoints save what; the per-save guard it replaces did (`ext-0.1-save-guard-spec.md`, superseded; why: `context/decisions/direction-change.md` and `architecture-assessment.md`; evidence: `session-lease-spike.md`).
+**Design: one active page per ST user.** A small lease file names the page that may write. Every other page is **parked**: it shows an overlay with **Use here**, and its requests to the server are held, never sent. Use here claims the lease and reloads the page, so it starts from fresh data. The lease needs no knowledge of which endpoints save what; the per-save guard it replaces did (why, and the evidence: `context/decisions/session-lease-spike.md`).
 
 **Scope:** every page that runs `session-lease.js`: desktop tabs with this extension installed, and the TravelingTavern app's page (bundled copy, app spec). Pages without it are not protected (E13).
 
@@ -81,7 +79,7 @@ No lease file (404) = free: the page claims (E4). A missing marker with a lease 
 
 - Every page knows a set of formats it can read, and writes only the newest format it knows
 - **A page that reads a format it doesn't know parks** (fail closed, R41): it doesn't claim, doesn't offer Use here, and never writes over the file. Its parked state names the outdated side, which is always its own copy: the extension on desktop (`source: 'extension'`), the app in the app's page (`source: 'app'`). See `leaseState` reason `unknownFormat` (E11)
-- A missing `format` is an unknown format. (Only the spike wrote files without it, and only on the test install; delete them there before testing.)
+- A missing `format` is an unknown format.
 - **`format` changes only for a change that would make an older reader decide wrongly** (a field whose meaning changes, a new field that a decision depends on). Additive fields that older readers can safely ignore don't bump it
 - Why so strict: the app's bundled copy lags the extension (it updates with app releases, the extension with `git pull`), so the two regularly run different versions against one file. A `format` bump locks the older side out until it updates
 - `format` is separate from `LEASE_VERSION` (E11), which changes with any lease behavior
@@ -152,7 +150,7 @@ Best effort, so closing the holder doesn't cost the next page a click (R15). The
 
 ## 6. Request Wrapper
 
-Wraps `window.fetch` and `XMLHttpRequest.prototype.open` / `send`. Nothing else in ST is patched.
+Wraps `window.fetch`, `XMLHttpRequest.prototype.open` / `send` and `navigator.sendBeacon`. Nothing else in ST is patched.
 
 **Server data** = a path under `/api/` or `/user/` (compared lower-case, trailing slashes ignored), or any method other than `GET`. Everything else (scripts, styles, templates, images, `/version`) passes untouched; `/csrf-token` passes after the ordering wait below. Every `GET` outside `/api/` and `/user/` only reads (E15).
 
@@ -331,13 +329,11 @@ The page never sends ST's CSRF token in a message. For the background release (A
 - **`LEASE_VERSION`** (integer, in `session-lease.js`): bumped on every change to lease behavior or to this contract. The app compares it; it never parses `manifest.json`'s version
 - **`format`** (E2): bumped only when the files change incompatibly
 - **`manifest.json` version** (`MAJOR.MINOR.PATCH`): the release shown to users; this spec ships as `0.2.0`
-- **Release candidate:** `v0.2.0-rc.1` is tagged on `dev` once the lease is complete. The app implements and tests against that tag; after both checklists pass, `v0.2.0` is released to `main` and the app re-pins to it before its own merge
+- **Release candidates and tags:** see `CLAUDE.md` → Versioning
 
 ### Names
 
-| Kept | Removed (save-guard design, never used by app code) |
-|---|---|
-| `window.__ttLease`, `window.__ttLeaseSource`, `window.__ttExtension`, `tt-extension-ready`, `tt-lease` (and its `type` field), `leaseState`, `leaseInfo`, `leaseNotice`, `LEASE_VERSION`, `TESTED_ST_VERSIONS`, `session-lease.js`, `tt-session-lease.json`, `tt-session-release.json`, the `TravelingTavern-Extension` folder, the app's `TravelingTavern` listener | `__ttSaveGuard` (`checkFresh`, `checkChat`, `pendingSaves`), `__ttGuardSource`, `tt-save-guard`, `saveBlocked`, `staleSettings`, `staleLorebooks`, `chatSaveRefused`, `guardInfo`, `__ttRev`, `__ttUser`, `GUARD_VERSION`, `save-guard.js` |
+`window.__ttLease`, `window.__ttLeaseSource`, `window.__ttExtension`, `tt-extension-ready`, `tt-lease` (and its `type` field), `leaseState`, `leaseInfo`, `leaseNotice`, `LEASE_VERSION`, `TESTED_ST_VERSIONS`, `session-lease.js`, `tt-session-lease.json`, `tt-session-release.json`, the `TravelingTavern-Extension` folder, the app's `TravelingTavern` listener.
 
 The app's own `window.__ttBridge` is not part of this contract.
 
@@ -380,20 +376,25 @@ The app's own `window.__ttBridge` is not part of this contract.
 
 **Unit** (`node --test`, no dependencies, fake `fetch`, one file per topic under `test/`). The lease's decisions are pure functions inside `createSessionLease({ fetch, post, now, sleep, storage, log })`; the browser wrapper stays thin.
 
-- Files: 404 vs unreadable; malformed JSON, missing fields; unknown fields ignored; unknown or missing `format` → park; released only on an exact pair match with known formats; a stale marker means nothing
-- Pair rule: claim verify; epoch-bump verify; a bump and a claim writing the same epoch
-- Claim: busy wait bounded at 60 s and skipped when released; during the wait a changed pair → `lostRace`, a release → the wait ends and the claim continues; grace; lost race; reopen flag; automatic claim at most once per tab
-- Start decision: own id → bump with `busy: false` (even if the file said `busy: true`); requests wait for the decision; duplicated tab (same id) → the older page parks on its next check
-- Writes: one in flight; re-read before each; 3 attempts 100–200 ms apart; park at once on a pair change or unknown format; an unreadable or missing re-read retried like a failed write, parking only after the last attempt; unchanged writes skipped
-- Failed writes after all retries: claim or epoch bump → parks; `active` → stays holder; `busy: false` → stays holder, written with the next lease write or check, and the file ends `busy: false`
-- Wrapper: what counts as server data; holder vs parked; 2 s read window; allowlist on and off (untested ST); held promises never settle; only chat saves aborted before a reload; `sendBeacon` refused while parked
-- `busy`: the generation request is sent only after `busy: true` is confirmed; a failed `busy: true` → request rejected with `AbortError`, never sent, toast; any `/api/backends/*/generate` matches; cleared only when the body is fully read or the stream closes, on error and on cancel, never when the headers arrive; dry runs never set it; overlapping generations
-- Release: marker on `pagehide` and on `freeze` (desktop only); resume after `freeze`: unchanged pair → bump, verify, holder without a reload; pair changed (before or during the grace) → `lost`; unreadable → `unreadable`; requests wait for the check; `resume` after a `pagehide` release is ignored and `pageshow` reloads; a parked page's `freeze` / `resume` do nothing
-- Messages: `leaseState`, `leaseInfo` and `leaseNotice` payloads, to the app and as `tt-lease` with `type`; no CSRF token or ST data in any message
-- Reopen: the flag read once per load and removed; only a holder after a claim reopens; character selected, chat opened only if different and only if the selection happened; group and deleted character → start screen, `active` kept; `CHAT_CHANGED` not recorded while pending, the open chat recorded after; `active` write failures and pair changes as in E3; an `active` write queued behind the page's own epoch bump retries once with the new pair, as `busy` does
-- Connect: pressed only after Use here / onForeground, only while `no_connection` and not while ST is already connecting; button by `main_api`, none for other APIs; `notConnected` after the 10 s wait, not when ST connects first; `connected` tracks `ONLINE_STATUS_CHANGED`; hooks attached at once (desktop) or on `load` (document start)
+- `files`: reading both files (E2): 404 vs unreadable, malformed JSON, missing and unknown fields, unknown or missing `format`, released only on an exact pair match
+- `pair-rule`: every decision compares (`holder`, `epoch`), never the epoch alone (E2)
+- `writes`: one write in flight, re-read first, 3 attempts 100–200 ms apart, unchanged writes skipped, outcomes per write type after all retries (E3)
+- `claim`: busy wait (60 s cap, skipped when released, changed pair → `lostRace`), claim write, grace, verify, lost race, reopen flag (E4)
+- `start-decision`: own tab → epoch bump with `busy: false`; free or released → automatic claim, once per tab; otherwise parked; refresh and duplicated tab (E4)
+- `release`: marker on `pagehide` and `freeze`, back/forward cache, the check on `resume` after a `freeze` (E5)
+- `wrapper`: what counts as server data, holder vs parked, 2 s read window, allowlist on and off, held requests never settle, only chat saves aborted, `sendBeacon` refused while parked, requests wait for the start decision (E6, E7)
+- `reload`: held chat saves aborted and ST's handlers run before the reload; a reload that doesn't happen ends in `reloadPending` (E7)
+- `busy`: generation requests sent only after `busy: true` is confirmed, `AbortError` and `replyNotStarted` when it can't be written, cleared only when the response is over, overlapping generations, writes behind the page's own bump (E8)
+- `csrf`: the lease's own CSRF token, fetched again once on 403; ST's `/csrf-token` ordered after it (E6)
+- `foreground`: `onForeground` for a holder (bump that invalidates its own marker) and a parked page (claims only a released or missing lease) (E11, app A5)
+- `instance`: one instance per page, main frame only, never on the login page, frozen `window.__ttLease`, desktop-only release wiring, `index.js` versions match (E11)
+- `messages`: `leaseState`, `leaseInfo` and `leaseNotice` payloads, to the app and as `tt-lease` with `type`; no CSRF token or ST data (E11)
+- `overlay`: what `index.js` shows for each report: overlay texts, toasts (E9, E10, E12)
+- `reopen`: the reopen flag, character reopen and its guards, group and deleted character → start screen, recording `active` (incl. behind the page's own bump) (E4)
+- `connect`: connect press only after Use here / onForeground and only while not connected or connecting, button by `main_api`, `notConnected` after the 10 s wait, `connected` tracking, hooks on desktop and at document start (E10)
+- `setup`: `manifest.json` points at `index.js`
 
-**Manual checklist, on the separate test install only** (never the install in daily use: `ai-guidelines.md`). Throwaway persona, lorebook, character and chat; Memory Books installed. Delete any lease files the spike left before starting.
+**Manual checklist, on the separate test install only** (never the real server: `CLAUDE.md` Hard Rules). Throwaway persona, lorebook, character and chat; Memory Books installed.
 
 - [ ] Two pages: the second parks; a stale page's chat, persona, card, lorebook and settings saves never reach the server
 - [ ] Use here: same chat reopened; switch time recorded. A group and a deleted character: start screen, logged. With ST's Auto-load chat on: the reopened chat wins

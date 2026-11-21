@@ -5,32 +5,33 @@
 - Concise and direct; explain non-obvious decisions briefly
 - Ask before large refactors or architectural changes
 - No features outside the current spec. Never delete files without asking
+- After 2–3 failed attempts, stop and explain; no random fixes. Ask when requirements are unclear
 
 ## Workflow (every feature / fix)
 
 1. **Document** it in @context/current-feature.md
 2. **Branch** from `dev`: `feature/…`, `fix/…` or `chore/…`
 3. **Implement** what current-feature.md describes
-4. **Test:** `node --test` must pass before every commit and merge. Then verify in SillyTavern: install the branch, hard-refresh (Ctrl+Shift+R), run the spec's manual checklist in a desktop browser. Anything touching the lease also needs the **two-page test** (two SillyTavern pages open, one holding an old copy), and a check in the TravelingTavern app when the spec asks
+4. **Test:** `node --test` passes before every commit and merge; then the spec's manual checklist on the test install. Lease changes also need the **two-page test** (two pages, one holding an old copy), and the app when the spec asks
 5. **Iterate** as needed
 6. **Commit** only with my permission, after tests pass and it works
 7. **Merge** into `dev` and push `dev`. Never merge or push to `main`
 8. **Delete** the branch after merging (ask first)
 9. **Review** AI-written code periodically and on request
-10. Mark complete in current-feature.md and add a history entry. History entries: 3–5 lines max — what changed, cause/key decisions, gotchas, what's unverified, version. No verification logs or test counts
+10. Mark complete in current-feature.md with a 3–5 line history entry (what changed, key decisions, gotchas, what's unverified, version); no test logs or counts
 
 ## Branches
 
-- **`dev`**: working branch. Feature branches start from it and merge back; local merge + push is fine. Never delete it. If a local merge isn't possible (cloud session), push the feature branch and open a PR into `dev`
-- **`main`**: what users get. SillyTavern installs from the default branch and updates with `git pull`, so `main` must always work. It changes only through a PR from `dev`, which I merge on GitHub
+- **`dev`**: working branch; feature branches start from it and merge back (local merge + push is fine; in a cloud session, a PR). Never delete it
+- **`main`**: what users get (SillyTavern installs from it and updates with `git pull`), so it must always work. Changes only through a PR from `dev`, which I merge
 
 ### Releasing to main (when I ask)
 
 0. **Release candidate** (when the app needs the code first): tag `vX.Y.Z-rc.N` on `dev` and push the tag. The app's feature branch pins it; both checklists run against it
-1. `dev` pushed, `node --test` passing, `manifest.json` version and (if lease behavior or the app contract changed) `LEASE_VERSION` bumped
-2. PR `dev` → `main`, titled with the version (e.g. `Release 0.1.0`), listing the history entries included and which manual checks were done (spec checklist, two-page test)
+1. `dev` pushed, `node --test` passing; versions bumped together: `manifest.json` and `EXTENSION_VERSION` in `index.js`, and, if lease behavior or the app contract changed, `LEASE_VERSION` in `session-lease.js` and `index.js`
+2. PR `dev` → `main` titled with the version (e.g. `Release 0.2.0`), listing the history entries included and the manual checks done (spec checklist, two-page test)
 3. I merge with **Create a merge commit** (not squash or rebase: they make `main` and `dev` drift apart)
-4. Tag the merge commit `vX.Y.Z`. Then the app repo bumps its submodule to that tag (from the rc tag, before the app's merge)
+4. Tag the merge commit `vX.Y.Z`; the app repo then bumps its submodule to it
 
 ## Private Data
 
@@ -48,37 +49,19 @@ The repo is public. Nothing identifying my network, devices or accounts in any c
 - Conventional messages (`feat:`, `fix:`, `chore:` …), one feature / fix per commit
 - Never add "Generated with Claude" to commit messages
 
-## When Stuck
-
-- After 2–3 failed attempts, stop and explain. No random fixes
-- Ask when requirements are unclear
-
 ## Investigating SillyTavern
 
-The lease depends on SillyTavern's endpoints, module exports and page behavior, which change between versions.
-
-- Never guess an endpoint, request / response shape, export, setting or DOM id. Confirm it in SillyTavern's source or the live page (DevTools) first
-- A spec item marked **(verify)** must be confirmed before building on it. Write the finding into the spec's Verified / Notes section with the SillyTavern version checked
-- Never test against real data: throwaway persona, lorebook, character and chat only
-- **Every manual test, spike and cleanup runs on a separate SillyTavern install** (its own folder and data, its own port), never the one in daily use. **No unreleased guard or lease code is ever installed in the SillyTavern in daily use**, not even for a quick check or to clean up through a page. Throwaway characters aren't enough: user files, settings, Quick Replies and extension data (e.g. Memory Books' `stmb-*.json`) are shared by the whole install. The session-lease spike and its cleanup overwrote real user files this way (`context/decisions/session-lease-spike.md`)
+- Never guess an endpoint, request / response shape, export, setting or DOM id. Confirm it in SillyTavern's source or the live page (DevTools) first, and write the finding into the spec's Verified section with the version checked
+- All of it on the test install only (`CLAUDE.md` Hard Rules): throwaway persona, lorebook, character and chat
 
 ## Code Changes
 
-- Minimal changes for the task; no unrelated refactors; no "nice to have" additions
-- Follow existing patterns. Lease logic goes in pure functions inside `createSessionLease`; desktop-only code goes in `index.js`
-- No dependencies, no build step, no secure-context APIs (`crypto.subtle`)
-- A change to lease behavior or the app contract bumps `LEASE_VERSION`; a change to anything the app depends on (see `CLAUDE.md` Hard Rules) is raised with me first
+- Minimal changes for the task; no unrelated refactors or "nice to have" additions
+- Follow existing patterns (`coding-standards.md`)
+- A change to anything the app depends on is raised with me first (`CLAUDE.md` Hard Rules)
 
 ## Code Review
 
-Check AI-written code especially for:
+Check AI-written code against `CLAUDE.md` Hard Rules and `coding-standards.md`, and also for:
 
-- **Held, never refused:** a parked page (and any page before its start decision) holds every server-data request; no held request is ever sent, before or after a reload; only held chat saves are aborted before a reload
-- **No exemptions:** nothing passes the wrapper by URL while parked; the lease's own I/O uses the original `fetch`; the read allowlist only skips the check in the holder, and each entry is confirmed read-only in ST's source
-- **Pair rule:** every lease decision compares (`holder`, `epoch`), never the epoch alone; one lease write in flight at a time
-- **Fail closed:** an unreadable lease or marker, a missing field or an unknown `format` parks the page; unreadable is never "free"
-- **Nothing else written:** the lease writes only `tt-session-lease.json` and `tt-session-release.json`, and adds nothing to SillyTavern's data
-- **Security:** no `eval`, no HTML built from data, nothing sensitive in console logs (never the CSRF token); `window.__ttLease` has no off switch
-- **Performance:** no polling except the claim's bounded `busy` wait; only bounded one-off delays
-- **Quiet on desktop:** no change to SillyTavern's look or behavior beyond the spec's overlay and toasts
-- **Patterns:** matches the existing code
+- **Spec drift:** the spec, its Verified section and the unit tests change in the same branch as the behavior they describe

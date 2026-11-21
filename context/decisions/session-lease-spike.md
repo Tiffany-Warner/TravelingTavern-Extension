@@ -1,111 +1,29 @@
-# Session-Lease Spike: Results
+# Session-Lease Spike: Decision and Requirements
 
-2026-11-20. Spike from `direction-change.md`, part 1 (desktop) only. Run against SillyTavern 1.19.0 in desktop Chrome, two to four tabs. Spike code lives on the local branch `spike/session-lease` (throwaway, not pushed, never merges): v1 `9673a60` refuse while parked · v2 `e2e692c` hold requests, modal overlay, ignore dry runs, 3 s grace · v3 `b12a3de` abort held requests, check every write, 1 s grace, re-raise overlay, reopen chat · v3.1 `a1aa3ba` log why a lease check fails · v4 `dda4e79` exempt nothing, abort only held chat saves, bounded lease-write retry · v4.1 `2943387` release marker on tab close, wait for the start decision · v4.2 `a3d6189` park and reload a holder restored from the back/forward cache. v4 onwards was tested only on a separate test install (SillyTavern 1.19.1, fresh data, Memory Books installed).
+2026-11-20. Owner decision, validated by a spike (desktop tabs, then the TravelingTavern app) against SillyTavern 1.19.0 and 1.19.1. Spike code lives on the local branch `spike/session-lease` (throwaway, never merges).
 
-## Incident: the spike wrote to real user data
+## Decision
 
-The spike ran on the SillyTavern install in daily use, with throwaway persona / lorebook / character / chat. That was not enough: user files are shared by the whole install.
+One SillyTavern (ST) page per ST user writes at a time: a **session lease** ("Use here"). Every other page is parked with its requests held, and taking over reloads the page from fresh data. **Accepted by the owner:** one device at a time, with a reload on every switch.
 
-- **Cause:** the spike's `fetch` wrapper exempted every `POST /api/files/upload` as a "lease request" (matched by path only). Before a takeover reload the page aborted its held requests; Memory Books treated its failed reads as missing files and uploaded default documents, which passed the exemption from a parked tab
-- **Overwrite 1, 16:00:09: `user/files/stmb-side-prompts.json`.** A parked tab, about to reload after a takeover, aborted its held requests; Memory Books treated the failed read as a missing file and uploaded its default document, which passed the upload exemption
-- **Overwrite 2, 16:17:45: `user/files/stmb-context-settings.json`** (now an empty "clean document"). Same hole: a held read of the file was aborted during a takeover and Memory Books uploaded a clean document. **The cleanup itself caused this one:** it took the lease with spike code to remove the test data through a page, running lease code against real data again
-- SillyTavern keeps no backups of user files; no earlier copies were found in `user/files/`, the backups folder or the settings backups (side prompts are not kept in `extension_settings`)
-- **Also changed and not reverted:** `settings.json` `active_character` (now `null`), `QuickReplies/Default.json` rewritten by the holder's save on page load, `stats.json` counters
-- **Rule from now on:** every manual test, spike and cleanup runs on a separate SillyTavern install. No unreleased guard or lease code is ever installed in the SillyTavern in daily use (`ai-guidelines.md`, Investigating SillyTavern)
+## Why
 
-## Results (part 1)
+An ST page reads a file once and later saves the whole file from its own copy; ST has no awareness of other open pages. Settings, chats, character cards, lorebooks, presets, Quick Replies, themes and groups are all exposed.
 
-| Check | Result |
-|---|---|
-| Lease read never served from cache | Pass |
-| Parked tab: no error storm, nothing reaches the server | v1 fail (refusing requests breaks ST startup; overlay buried under ST's loader). v2+ pass with held requests, except the hole above |
-| **Use here** lands on a usable page, same chat | Pass (v3 reopens the chat from the lease's `active` in 42–71 ms) |
-| Persona, chat messages, character card survive a stale tab | Pass |
-| Memory Books in the holder works; a parked tab's Memory Books writes nothing | Holder pass. Parked: its chat save was held, but see the incident: aborted reads led to default-file uploads through the exemption |
-| Takeover while generating waits for `busy` | Pass after ignoring dry runs |
-| Save queued just before a takeover | Pass: held by the pre-write check, or sent before the claim and then visible in the new holder; never applied after the new holder loaded (4 rounds incl. a 3 MB save) |
-| Two tabs click **Use here** at once | Pass: exactly one holder |
-| Server unreachable | Pass: holder and parked tab park, saves held, nothing sent after restart, no automatic re-claim |
-| Popup open before parking / opened after parking | Pass: overlay re-raised, **Use here** clickable |
+- **Per-save guard, rejected:** per-file version checks need a different mechanism for each data type and depend on about a dozen ST endpoints and internals. The endpoint list is never complete, and a missed or renamed endpoint fails silently: the save goes through unguarded. Three design reviews in one day each found a new hole
+- **A separate memory system, rejected as the fix:** moving memories out of lorebooks protects one data type of five, and Memory Books would need a fork
+- **Session lease, accepted:** one rule covers every write and depends on almost nothing inside ST
 
-- **Switch time** (1 s grace, click to reopened chat): 3.3–3.9 s. With a 3 s grace: 5.4–5.6 s
-- **Pre-write lease check** (same PC, through Tailscale): 2–8 ms, 49 ms worst. SillyTavern uses POST for most reads, so nearly every request is checked
-- **Before the extension parks a fresh desktop tab**, ST sends only reads: `/csrf-token`, `/version`, `/api/secrets/read`, `/api/settings/get`, `/api/extensions/discover`. Built-in translate, connection-manager and regex load before the extension
-- **Requests outside `fetch`:** XHR `POST /api/tokenizers/openai/count` (caught by the XHR wrapper); templates via XHR are static GETs. No `sendBeacon`. WebSockets not checked
+## Incident
 
-## Re-check on the test install (v4–v4.2)
-
-| Check | Result |
-|---|---|
-| Lease-write retry | Pass: the `EPERM` 500 recurred after a takeover; retry succeeded on attempt 2, no false park; six takeovers in a row clean |
-| No exemptions, held reads stay pending | Pass: parked tabs held Memory Books' reads of both files six times; takeovers didn't abort them; no default files written |
-| Only held chat saves aborted before a reload | Pass: reload went through with no "Leave site?"; the held message never reached disk |
-| Release on tab close | Pass: a new tab claimed without a click |
-| Holder refresh (F5) | Pass: stays holder, no extra reload; epoch bumped so its own marker stops counting |
-| Old tab closed after a takeover | Pass: its marker names its old claim; the new holder's lease untouched; a new tab parks |
-| Back/forward cache | v4.1 fail: a restored holder stayed unparked and its save reached disk. v4.2 pass: restored holder parks and reloads; a write at the moment of restore was held and never reached disk |
-| Takeover while generating | Pass (model connected): the new tab waited for `busy`, the reply was saved before it loaded |
-
-- Switch time (1 s grace, click to reopened chat): 3.2–3.3 s
-- **Release timing:** the marker is written on `pagehide`, not `beforeunload`. `pagehide` fires only when the page really leaves (after a "Leave site?" prompt is accepted; a cancelled prompt releases nothing). It also fires when the page enters the back/forward cache, hence the v4.2 fix
-
-## Part 2, stage 1: the app with no app changes
-
-TravelingTavern app (debug build) on the Pixel 8, pointed at the test install over Tailscale; the extension's spike code (v4.2) runs inside the app's WebView.
-
-| Check | Result |
-|---|---|
-| App's WebView runs the lease | Pass: claimed a released lease without a click; reopened the chat after a takeover |
-| Desktop takes over → app parks | Pass for data safety: the app parks on its next request; held requests never reached the server |
-| App shows it is parked | Fail: native screens keep their last data with no sign; the bridge's refresh is held silently. The overlay appears only inside the chat screen |
-| Overlay in the app's chat screen | Partial: **Use here** works, but a Memory Books popup underneath shows through the backdrop |
-| **Use here** from the phone | Pass, but 5.7 s to ready and 6.0 s to the reopened chat (desktop 3.3 s) |
-
-- **Pre-request lease check from the Pixel over Tailscale:** 11–49 ms, one 123 ms; about 27 checks on page load
-- Not run in stage 1: native writes while parked, takeover while generating between app and desktop (need app code: stage 2)
-
-## Part 2, stage 2: app spike code
-
-Extension v5 (app hooks: state reports, native Use here, foreground check) and an app spike on a local branch in the app repo, built as a separate app (`.spike` applicationId, refuses any server not on the test install's port). The page reports its lease state to Kotlin; Kotlin shows a native scrim, checks the lease before every bridge command, writes the background release itself (OkHttp), and asks the page to check on return.
-
-| Check | Result |
-|---|---|
-| Starts parked while the desktop holds the lease | Pass: native "In use on another device" + Use here on every tab |
-| Native actions (+, send) blocked up front | Pass: scrim swallows taps; bridge commands refused by the Kotlin pre-check, never left on a held request |
-| Requests at page load before the extension decides | Pass: reads only (`/csrf-token`, `/version`, `/api/secrets/read`, `/api/settings/get`, `/api/extensions/discover`, lease reads); ST's `settings/save` held; nothing from `bridge.js` or clean mode |
-| "Visual" bridge commands while parked | Pass for data, but `setAppState` isn't visual: on return it runs the persona sync, whose request the page's wrapper held |
-| Background release with JavaScript paused | Pass: page JS paused in the debugger, app sent to background; Kotlin wrote the marker for the exact claim |
-| Desktop after a background release / app returning after it | Pass: desktop claimed without a click; the returning app parked |
-| Foreground takeover only when released | Pass: stayed parked while the desktop held the lease |
-| Killed app | Pass: no marker; desktop shows Use here |
-| Takeover while generating, both directions | Pass: the claimer waited for `busy`; the reply was saved before the claim and shown after the switch |
-| Reply generating while the app goes to the background | **Fail:** the reply stalls until the app returns (see Findings) |
-
-- **Phone switch** (Use here → reopened chat): 6.6 s = claim 0.09 s, grace 1.0 s, verify + reload to the new page's first request 0.9 s, ST startup reads until "holder" 1.6 s, holder → `APP_READY` 2.6 s (about 25 serial lease checks, 20–40 ms each), reopen 0.4 s. The lease's share is about 1.8 s
-
-## Findings
-
-- **False park of the real holder:** `/api/files/upload` answered 500 on a lease metadata write right after a takeover reload (seen 4 times, reproduced). Server error: `EPERM: operation not permitted, rename 'tt-session-lease.json.<n>' -> 'tt-session-lease.json'` from `write-file-atomic` (`renameSync`, no retry). Windows refuses to rename over a file another handle has open (a concurrent lease read, or a virus scanner on the fresh file). Transient
-- **Memory Books creates default files when a read fails** (`stmb-side-prompts.json`, and a "clean document" for context settings). In a parked tab this must stay impossible; in the holder a transient read failure can still overwrite user files, outside our control
-- `GENERATION_STARTED` also fires for dry runs (prompt assembly only) with no end event
-- A held chat save keeps ST's `isChatSaving` set; ST's `beforeunload` then blocks the reload ("Leave site?")
-- ST popups are modal dialogs: anything outside them is inert, including an overlay opened earlier
-- The holder sends `POST /api/quick-replies/save` on every page load (whole-file save at load)
-- After updating the extension, one tab kept running cached code until closed
-- **`busy` sticks when a generation fails before it starts:** with no model connection ST fires `GENERATION_STARTED` and returns early with no end event; the next takeover waited the full 60 s timeout
-- After a takeover reload ST does not reconnect to the model unless its auto-connect option is on
-- **A reply stalls while the app is in the background.** The app never pauses its WebView (no `onPause()`, `pauseTimers()` or removal on stop). **Likely cause:** about 20 s after Home, Android's cached-app freezer freezes the WebView's renderer process (seen: `isFrozen=true` and the page stopped answering; a page heartbeat to confirm it didn't run, so the implementation must confirm the cause). The reply resumed only after the app returned; meanwhile the release stayed deferred and `busy` stayed `true`, so a desktop takeover would wait out the 60 s limit and the app's late reply would then be held and discarded
-- **The app's first load ran older cached extension code** after the extension was updated, until a reload. A page running stale lease code is a safety gap, not just an inconvenience
-- A release can be written late, as a frozen app thaws. Harmless by design: the marker names the old claim and the returning page bumps its epoch
-- Closing a tab doesn't release the lease by itself: without the release marker every desktop switch after closing the holder costs a **Use here** click. The marker is best effort (a crash or killed browser skips it), so **Use here** stays the fallback
+The first spike ran on the real server: an upload exemption let a parked tab, and later the cleanup, overwrite two real Memory Books files.
+Since then every manual test, spike and cleanup runs on the separate test install.
 
 ## Verdict
 
-The session lease protects every data type tested with one rule and no knowledge of ST's save endpoints. Parking is tolerable with held requests: ST stays quiet behind the overlay, and a switch costs about 3.5 s. It is **not safe as spiked**: one exemption let a parked tab overwrite real user files, and a transient Windows error parks the real holder. Both have clear fixes (below). Proceed to a spec with the requirements below, then run part 2 (the app) on a separate install before building the release.
+The lease protects every data type tested, between desktop tabs and the app, including takeovers during a reply, a release with JavaScript paused and a killed app; nothing reached the server from a parked page. Parking is tolerable with held (not refused) requests. The fixes the spike found (no exemptions, lease-write retry, release marker, back/forward cache) are requirements below.
 
-**Update after the re-check (v4–v4.2):** both fixes, release on tab close and the back/forward-cache handling pass on the test install.
-
-**Final (after part 2):** the spike is complete. The lease works between desktop tabs and the app in every case tested, including takeovers during a reply, a background release with JavaScript paused and a killed app; nothing reached the server from a parked page. The app needs native support (parked state, up-front blocking, release from Kotlin), and a reply in the background is an open decision. **Next step: the spec**, built from the requirements below. Still unchecked: WebSockets.
+**Switch time** (Use here to the reopened chat): desktop ≈3.3–3.9 s, phone ≈6.6 s (about 1.8 s of the phone's time is the lease: grace and checks).
 
 ## Requirements for the spec
 
