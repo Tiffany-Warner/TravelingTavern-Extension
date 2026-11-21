@@ -2,7 +2,7 @@
 
 > **Reviewed** (2026-11-20). Items marked **(verify)** must be confirmed in SillyTavern's source before they're built on.
 
-Replaces `ext-0.1-save-guard-spec.md` (superseded). Requirements: `context/decisions/session-lease-spike.md` (cited as **R1–R44**). Plan and requirement map: `session-lease-outline.md`. App side: the TravelingTavern repo's `session-lease-app-spec.md`, which references this spec for every shared definition and never restates it.
+Replaces `ext-0.1-save-guard-spec.md` (superseded). Requirements: `context/decisions/session-lease-spike.md` (cited as **R1–R44**). Requirement map: `session-lease-spike.md` → Requirement Map (final). App side: the TravelingTavern repo's `session-lease-app-spec.md`, which references this spec for every shared definition and never restates it.
 
 ## 1. Purpose and Rule
 

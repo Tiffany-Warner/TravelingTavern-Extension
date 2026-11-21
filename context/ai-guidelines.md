@@ -11,7 +11,7 @@
 1. **Document** it in @context/current-feature.md
 2. **Branch** from `dev`: `feature/…`, `fix/…` or `chore/…`
 3. **Implement** what current-feature.md describes
-4. **Test:** `node --test` must pass before every commit and merge. Then verify in SillyTavern: install the branch, hard-refresh (Ctrl+Shift+R), run the spec's manual checklist in a desktop browser. Anything touching the guard also needs the **two-page test** (two SillyTavern pages open, one holding an old copy), and a check in the TravelingTavern app when the spec asks
+4. **Test:** `node --test` must pass before every commit and merge. Then verify in SillyTavern: install the branch, hard-refresh (Ctrl+Shift+R), run the spec's manual checklist in a desktop browser. Anything touching the lease also needs the **two-page test** (two SillyTavern pages open, one holding an old copy), and a check in the TravelingTavern app when the spec asks
 5. **Iterate** as needed
 6. **Commit** only with my permission, after tests pass and it works
 7. **Merge** into `dev` and push `dev`. Never merge or push to `main`
@@ -26,7 +26,7 @@
 
 ### Releasing to main (when I ask)
 
-1. `dev` pushed, `node --test` passing, `manifest.json` version and (if guard behavior changed) `GUARD_VERSION` bumped
+1. `dev` pushed, `node --test` passing, `manifest.json` version and (if lease behavior or the app contract changed) `LEASE_VERSION` bumped
 2. PR `dev` → `main`, titled with the version (e.g. `Release 0.1.0`), listing the history entries included and which manual checks were done (spec checklist, two-page test)
 3. I merge with **Create a merge commit** (not squash or rebase: they make `main` and `dev` drift apart)
 4. Tag the merge commit `vX.Y.Z`. Then the app repo bumps its submodule to that tag
@@ -54,7 +54,7 @@ The repo is public. Nothing identifying my network, devices or accounts in any c
 
 ## Investigating SillyTavern
 
-The guard depends on SillyTavern's endpoints, module exports and page behavior, which change between versions.
+The lease depends on SillyTavern's endpoints, module exports and page behavior, which change between versions.
 
 - Never guess an endpoint, request / response shape, export, setting or DOM id. Confirm it in SillyTavern's source or the live page (DevTools) first
 - A spec item marked **(verify)** must be confirmed before building on it. Write the finding into the spec's Verified / Notes section with the SillyTavern version checked
@@ -64,17 +64,20 @@ The guard depends on SillyTavern's endpoints, module exports and page behavior, 
 ## Code Changes
 
 - Minimal changes for the task; no unrelated refactors; no "nice to have" additions
-- Follow existing patterns. Guard logic goes in pure functions inside `createSaveGuard`; desktop-only code goes in `index.js`
+- Follow existing patterns. Lease logic goes in pure functions inside `createSessionLease`; desktop-only code goes in `index.js`
 - No dependencies, no build step, no secure-context APIs (`crypto.subtle`)
-- A change to guard behavior bumps `GUARD_VERSION`; a change to anything the app depends on (see `CLAUDE.md` Hard Rules) is raised with me first
+- A change to lease behavior or the app contract bumps `LEASE_VERSION`; a change to anything the app depends on (see `CLAUDE.md` Hard Rules) is raised with me first
 
 ## Code Review
 
 Check AI-written code especially for:
 
-- **Data safety:** no path where a stale save is sent; fails closed on unreadable or unrecognized requests; guard marks (`__ttRev`, `__ttUser`) never sent or left in SillyTavern's cache; no read-back used as a base
-- **Coverage:** every whole-file save endpoint in the spec is matched; nothing passes through by default that should be guarded
-- **Security:** no `eval`, no HTML built from data, nothing sensitive in console logs; the guard exposes no way to turn itself off
-- **Performance:** no timers or polling; no whole-chat downloads to compare; settings checks rate-limited
-- **Quiet on desktop:** no change to SillyTavern's look or behavior beyond the spec's toasts
+- **Held, never refused:** a parked page (and any page before its start decision) holds every server-data request; no held request is ever sent, before or after a reload; only held chat saves are aborted before a reload
+- **No exemptions:** nothing passes the wrapper by URL while parked; the lease's own I/O uses the original `fetch`; the read allowlist only skips the check in the holder, and each entry is confirmed read-only in ST's source
+- **Pair rule:** every lease decision compares (`holder`, `epoch`), never the epoch alone; one lease write in flight at a time
+- **Fail closed:** an unreadable lease or marker, a missing field or an unknown `format` parks the page; unreadable is never "free"
+- **Nothing else written:** the lease writes only `tt-session-lease.json` and `tt-session-release.json`, and adds nothing to SillyTavern's data
+- **Security:** no `eval`, no HTML built from data, nothing sensitive in console logs (never the CSRF token); `window.__ttLease` has no off switch
+- **Performance:** no polling except the claim's bounded `busy` wait; only bounded one-off delays
+- **Quiet on desktop:** no change to SillyTavern's look or behavior beyond the spec's overlay and toasts
 - **Patterns:** matches the existing code

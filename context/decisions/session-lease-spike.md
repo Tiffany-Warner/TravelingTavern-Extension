@@ -153,3 +153,28 @@ The session lease protects every data type tested with one rule and no knowledge
 42. **CSRF token for the app's background release:** Kotlin fetches its own token from `/csrf-token` with the WebView's cookies (ST's `csrf-sync` returns the session's existing token, so the page's token is untouched); it never travels through a page message. Kept in memory only, never logged or stored (added at outline review)
 43. **Foreground (app):** the app takes over automatically only when the lease was released; otherwise it shows the native parked state (owner's stage 2 decision)
 44. **Background release (app):** Kotlin writes the release marker over HTTP, so it works with the page's JavaScript paused or frozen; deferred while a reply generates (see 25); a killed app writes nothing and the desktop falls back to Use here
+
+## Requirement Map (final)
+
+Which spec section owns each requirement. **E** = `context/specs/ext-0.2-session-lease-spec.md` (this repo), **A** = `context/specs/session-lease-app-spec.md` (TravelingTavern repo). Every requirement has exactly one owner; the other spec links to it.
+
+| # | Section | # | Section | # | Section |
+|---|---|---|---|---|---|
+| 1 | E6 | 15 | E5 | 29 | A3 |
+| 2 | E6 | 16 | E5 | 30 | E4 |
+| 3 | E7 | 17 | E5 | 31 | E6 |
+| 4 | E7 | 18 | E6 | 32 | E13 |
+| 5 | E6 | 19 | E8 | 33 | A2 |
+| 6 | E4 | 20 | split → 36, 37 | 34 | Docs: `coding-standards.md` |
+| 7 | E3 | 21 | E6 | 35 | E4 |
+| 8 | E8 | 22 | E13 (done; measured cost) | 36 | E10 |
+| 9 | E9 | 23 | split → 38, 39 | 37 | A7 |
+| 10 | E4 | 24 | E3 | 38 | A3 |
+| 11 | E6 | 25 | A6 | 39 | A4 |
+| 12 | split → 31–33 | 26 | A2 | 40 | E11 |
+| 13 | split → 34, 35 | 27 | A4 | 41 | E2 |
+| 14 | E14 | 28 | A3 | 42 | E11 |
+|  |  |  |  | 43 | A5 |
+|  |  |  |  | 44 | A5 |
+
+A10 links 14; A5 links 15 and 42; A2 links 40.

@@ -2,7 +2,7 @@
 
 ## Session-Lease Spike
 
-**Status:** Spike complete (desktop and app); next: the spec
+**Status:** Spike and specs complete; next: implementing `v0.2.0` from `ext-0.2-session-lease-spec.md`
 **Branch:** `spike/session-lease` (from `dev`; local, throwaway, never merges)
 **Plan:** `context/decisions/direction-change.md` (Spike section). Background: `context/decisions/architecture-assessment.md`
 **Results:** `context/decisions/session-lease-spike.md` (results, incident, verdict, requirements for the spec)
@@ -22,13 +22,12 @@ Prove or disprove that one active SillyTavern page at a time ("Use here" session
 3. [x] **Part 2 (the app) on the test install:**
     - [x] stage 1, the app with no app changes (results in `session-lease-spike.md`): safe, but the app gives no native sign it is parked; phone switch about 6 s
     - [x] stage 2, app spike code (extension v5 `efa0743`, app `cbd9aac` on the app repo's local `spike/session-lease`, separate `.spike` app, test install only): native parked state, up-front blocking, foreground takeover only when released, release from Kotlin, takeover while generating all pass; a reply in the background stalls (decided: `shortService` foreground service, requirement 25). Document-start holding not built (everything before the extension decides is a read)
-4. [ ] **Spec** from the requirements in `session-lease-spike.md`, with `coding-standards.md` updated for one-off delays
+4. [x] **Specs:** `context/specs/ext-0.2-session-lease-spec.md` (reviewed) and the app's `session-lease-app-spec.md` (reviewed); requirement map in `session-lease-spike.md`; `coding-standards.md`, `CLAUDE.md` and `project-schema.md` rewritten for the lease
 
 ### Notes
 
 - **Per-save guard stopped** 2026-11-20 (owner decision). `ext-0.1-save-guard-spec.md` is marked superseded and kept for its source findings. Slice 1 (core + settings) is on `feature/save-guard` (`wip`, pushed, not merged), kept for the fallback
 - The TravelingTavern app is blocked on the spec
-- `project-schema.md` and `CLAUDE.md` still describe the per-save guard (only `CLAUDE.md`'s test hard rule and a pointer at its top changed); both revised with the spec
 
 ## History
 
