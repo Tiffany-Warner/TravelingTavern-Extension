@@ -100,7 +100,7 @@ No decision uses a clock time from the files: devices' clocks differ (seconds ap
     - **`busy: true`** → see below
     - **`busy: false`** → the page stays holder and keeps the pending `busy: false`: it is written with the holder's next lease write or lease check, until it lands, so the file never stays `busy: true` after a reply
 - **Skip unchanged writes:** no write when `busy` and `active` already have the values to be written
-- **A failed `busy: true` is not just metadata:** claimers wouldn't wait for the reply. The generation request is sent only after `busy: true` is written and confirmed (E8). If that write fails after the retry above, the request is **not sent**: the wrapper rejects it with an `AbortError` (as ST's Stop would), so ST ends the generation, and one toast says "Couldn't reach SillyTavern to start the reply. Try again."
+- **A failed `busy: true` is not just metadata:** claimers wouldn't wait for the reply. The generation request is sent only after `busy: true` is written and confirmed (E8). If that write fails after the retry above, the request is **not sent**: the wrapper rejects it with an `AbortError` (as ST's Stop would), so ST ends the generation, and the page reports `leaseNotice` `replyNotStarted` (E11): desktop shows one toast, "Couldn't reach SillyTavern to start the reply. Try again."; the app shows its native notice (A7)
 - One-off delays (this retry, the grace wait in E4) are bounded and allowed; no repeating timers (`coding-standards.md`, R34)
 
 ## 4. Claim and Takeover
@@ -177,7 +177,7 @@ Wraps `window.fetch` and `XMLHttpRequest.prototype.open` / `send`. Nothing else 
 
 ## 9. Web Overlay (desktop)
 
-Shown by `index.js` from `tt-lease` events (E11). **Overlay only, no toast** for parked tabs. Never shown in the app's page.
+Shown by `index.js` from `tt-lease` events of type `leaseState` (E11). **Overlay only, no toast** for parked tabs. Never shown in the app's page.
 
 **Behavior**
 
@@ -211,7 +211,7 @@ Shown by `index.js` from `tt-lease` events (E11). **Overlay only, no toast** for
 ST connects to the model at startup only when its **Auto-connect** option is on (`power_user.auto_connect`, off by default). After a takeover reload the user would otherwise land in their chat unable to generate (R36; seen on desktop and in the app).
 
 - After a reload that follows **Use here** or the app's `onForeground()` claim (not the automatic claim at start: that page was never connected in this session, and ST's own Auto-connect decides), once `APP_READY` has fired and the page is holder: if ST's `onlineStatus` is `no_connection`, the page presses ST's own connect button for the selected API, once: the same buttons ST's auto-connect presses (`#api_button`, `#api_button_novel`, `#api_button_textgenerationwebui`, `#api_button_openai`, chosen by `main_api`) **(verify)**
-- Still not connected after ST's own attempt: desktop shows one toast, "Not connected to a model. Connect in API Connections."; the app shows its native notice (A7), from a `connected` field in `leaseState` (additive, no `format` bump)
+- Still not connected after ST's own attempt: the page reports `leaseNotice` `notConnected` (E11). Desktop shows one toast, "Not connected to a model. Connect in API Connections."; the app shows its native notice (A7) until `leaseState.connected` turns `true`
 - Never changes ST's settings (doesn't turn Auto-connect on)
 
 ## 11. App Contract *(shared)*
@@ -230,7 +230,7 @@ Everything the app and the extension rely on from each other. Changing any of it
 - `session-lease.js` installs once per page, in the main frame only. It defines `window.__ttLease` as non-writable and non-configurable; a second copy that finds it already defined **stands down completely** (no wrapper, no lease reads, no messages)
 - **In the app's page** the bundled copy is injected at document start, so it is always first. An installed extension then stands down for the lease, but still announces itself (`window.__ttExtension`, `tt-extension-ready`) so `leaseInfo` can report its version
 - **On desktop** `index.js` sets `window.__ttLeaseSource = 'extension'` and loads `session-lease.js`. A copy injected without that mark reports `source: 'app'`
-- Where reports go: if the app's `TravelingTavern` listener exists, to the app (messages below); otherwise a `tt-lease` `CustomEvent` on `window` with the same payload as `leaseState` in `detail`, for `index.js`'s overlay
+- Where reports go: if the app's `TravelingTavern` listener exists, to the app (messages below); otherwise a `tt-lease` `CustomEvent` on `window`, for `index.js`. Its `detail` is `{ type, ...fields }`: `type` is the message type (`leaseState`, `leaseInfo` or `leaseNotice`) and the fields are that message's, below. `index.js` drives the overlay from `leaseState` and the toasts from `leaseInfo` (untested ST version, E12) and `leaseNotice`
 
 ### `window.__ttLease`
 
@@ -281,6 +281,14 @@ The app compares the two versions in both directions (A8):
 
 It also uses `leaseVersion` to confirm its page runs the current code (R26, A2).
 
+**`leaseNotice`**: a one-off event the user should hear about, sent once each time it happens.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `kind` | string | `"replyNotStarted"`: `busy: true` couldn't be written, so the generation request wasn't sent (E3, E8). `"notConnected"`: after a takeover reload ST is still not connected to a model after the page's connect attempt (E10) |
+
+Readers ignore a `kind` they don't know. Desktop shows the toast for each kind (E3, E10); the app shows its native notices (A7).
+
 ### `window.__ttExtension`
 
 Set by `index.js` before it loads (or stands down for) `session-lease.js`: `{ version: "<manifest version>", leaseVersion: <integer> }`, frozen. Then it fires `tt-extension-ready` on `window`.
@@ -294,12 +302,13 @@ The page never sends ST's CSRF token in a message. For the background release (A
 - **`LEASE_VERSION`** (integer, in `session-lease.js`): bumped on every change to lease behavior or to this contract. The app compares it; it never parses `manifest.json`'s version
 - **`format`** (E2): bumped only when the files change incompatibly
 - **`manifest.json` version** (`MAJOR.MINOR.PATCH`): the release shown to users; this spec ships as `0.2.0`
+- **Release candidate:** `v0.2.0-rc.1` is tagged on `dev` once the lease is complete. The app implements and tests against that tag; after both checklists pass, `v0.2.0` is released to `main` and the app re-pins to it before its own merge
 
 ### Names
 
 | Kept | Removed (save-guard design, never used by app code) |
 |---|---|
-| `window.__ttLease`, `window.__ttLeaseSource`, `window.__ttExtension`, `tt-extension-ready`, `tt-lease`, `leaseState`, `leaseInfo`, `LEASE_VERSION`, `TESTED_ST_VERSIONS`, `session-lease.js`, `tt-session-lease.json`, `tt-session-release.json`, the `TravelingTavern-Extension` folder, the app's `TravelingTavern` listener | `__ttSaveGuard` (`checkFresh`, `checkChat`, `pendingSaves`), `__ttGuardSource`, `tt-save-guard`, `saveBlocked`, `staleSettings`, `staleLorebooks`, `chatSaveRefused`, `guardInfo`, `__ttRev`, `__ttUser`, `GUARD_VERSION`, `save-guard.js` |
+| `window.__ttLease`, `window.__ttLeaseSource`, `window.__ttExtension`, `tt-extension-ready`, `tt-lease` (and its `type` field), `leaseState`, `leaseInfo`, `leaseNotice`, `LEASE_VERSION`, `TESTED_ST_VERSIONS`, `session-lease.js`, `tt-session-lease.json`, `tt-session-release.json`, the `TravelingTavern-Extension` folder, the app's `TravelingTavern` listener | `__ttSaveGuard` (`checkFresh`, `checkChat`, `pendingSaves`), `__ttGuardSource`, `tt-save-guard`, `saveBlocked`, `staleSettings`, `staleLorebooks`, `chatSaveRefused`, `guardInfo`, `__ttRev`, `__ttUser`, `GUARD_VERSION`, `save-guard.js` |
 
 The app's own `window.__ttBridge` is not part of this contract.
 
@@ -313,7 +322,7 @@ The app's own `window.__ttBridge` is not part of this contract.
 
 - `TESTED_ST_VERSIONS` in `session-lease.js`: the ST versions this lease was tested against, starting with **1.19.0 and 1.19.1** (the spike). Read from ST's `/version` at start
 - The lease depends on ST's endpoint names in only three places: the allowlist (E6), the chat-save paths aborted before a reload (E7) and the generation endpoints (E8). Everything else is held or checked whatever its name
-- **Untested ST version:** the allowlist is turned off (every request is checked: slower, never less safe); `leaseInfo.untestedServer` is `true`; desktop shows one toast per ST version: "TravelingTavern hasn't been tested with this SillyTavern version." Chat-save and generation paths stay as they are: if ST renamed them, a reload may show "Leave site?" or a takeover may not wait for a reply, and the checklist (E14) catches both before the version is added
+- **Untested ST version:** the allowlist is turned off (every request is checked: slower, never less safe); `leaseInfo.untestedServer` is `true`; desktop (`index.js`, from the `leaseInfo` event) shows one toast per ST version: "TravelingTavern hasn't been tested with this SillyTavern version." Chat-save and generation paths stay as they are: if ST renamed them, a reload may show "Leave site?" or a takeover may not wait for a reply, and the checklist (E14) catches both before the version is added
 - On every ST release: re-check the three lists in ST's source, run the checklist on the test install, then add the version
 
 ## 13. Known Limits
@@ -341,7 +350,7 @@ The app's own `window.__ttBridge` is not part of this contract.
 - Failed writes after all retries: claim or epoch bump → parks; `active` → stays holder; `busy: false` → stays holder, written with the next lease write or check, and the file ends `busy: false`
 - Wrapper: what counts as server data; holder vs parked; 2 s read window; allowlist on and off (untested ST); held promises never settle; only chat saves aborted before a reload; `sendBeacon` refused while parked
 - `busy`: the generation request is sent only after `busy: true` is confirmed; a failed `busy: true` → request rejected with `AbortError`, never sent, toast; any `/api/backends/*/generate` matches; cleared only when the body is fully read or the stream closes, on error and on cancel, never when the headers arrive; dry runs never set it; overlapping generations
-- Messages: `leaseState` and `leaseInfo` payloads; no CSRF token or ST data in any message
+- Messages: `leaseState`, `leaseInfo` and `leaseNotice` payloads, to the app and as `tt-lease` with `type`; no CSRF token or ST data in any message
 
 **Manual checklist, on the separate test install only** (never the install in daily use: `ai-guidelines.md`). Throwaway persona, lorebook, character and chat; Memory Books installed. Delete any lease files the spike left before starting.
 

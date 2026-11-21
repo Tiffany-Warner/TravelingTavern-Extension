@@ -46,6 +46,7 @@ Branches:
 - `dev`: work in progress
 - `main`: what users get. SillyTavern installs from the default branch and updates with `git pull`, so `main` must always work and only changes through a release PR from `dev`. Tag each release on `main`
 - The app pins a tag through its git submodule. After tagging, bump the submodule in the app repo
+- When the app needs lease code before a release, tag a release candidate on `dev` (`vX.Y.Z-rc.N`). The app builds and tests against it, then re-pins to the release tag before its own merge. The app never points at an untagged commit
 
 ## Architecture
 
@@ -65,7 +66,7 @@ Branches:
 - **Nothing can turn the lease off** from the page: `window.__ttLease` is frozen and has no off switch
 - **Don't change how SillyTavern looks or behaves** beyond parking pages, the overlay and the toasts in the spec. Don't modify SillyTavern's own code
 - **Keep the repo and folder name `TravelingTavern-Extension`.** SillyTavern installs into a folder named after the repo, and the app's install and update calls use that name
-- **Keep the names the app depends on** (spec E11): `window.__ttLease` (`version`, `source`, `useHere`, `onForeground`), `window.__ttLeaseSource`, `window.__ttExtension` (`version`, `leaseVersion`), the `tt-extension-ready` and `tt-lease` events, the `leaseState` and `leaseInfo` messages and their fields, and the two lease files with their fields. If one has to change, say so before changing it, and bump `LEASE_VERSION`
+- **Keep the names the app depends on** (spec E11): `window.__ttLease` (`version`, `source`, `useHere`, `onForeground`), `window.__ttLeaseSource`, `window.__ttExtension` (`version`, `leaseVersion`), the `tt-extension-ready` and `tt-lease` events (incl. `tt-lease`'s `type`), the `leaseState`, `leaseInfo` and `leaseNotice` messages and their fields, and the two lease files with their fields. If one has to change, say so before changing it, and bump `LEASE_VERSION`
 - **Every endpoint list the lease uses is in the spec** (read allowlist, chat-save paths, generation endpoints). When SillyTavern releases a new version, re-check them in its source and run the checklist before widening `TESTED_ST_VERSIONS`
 - **Never test against real data.** Every manual test, spike and cleanup runs on a separate SillyTavern install, never the one in daily use, and no unreleased lease code is ever installed there. Throwaway personas, lorebooks, characters and chats aren't enough: user files and extension data are shared by the whole install. Editing the live page's copy of real data erased a persona once; the session-lease spike and its cleanup overwrote real Memory Books files
 - **The repo is public.** No server addresses, Tailscale IPs, ports, tokens or anything else private in code, tests, docs or commit messages
