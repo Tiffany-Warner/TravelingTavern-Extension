@@ -48,6 +48,14 @@ function createFakeWindow({ harness, files, pathname = '/', source, storage = { 
         abort() {
             this.aborted = true;
         }
+        addEventListener(type, fn) {
+            this.listeners = this.listeners || {};
+            (this.listeners[type] = this.listeners[type] || []).push(fn);
+        }
+        /** Fires an XHR event (e.g. loadend) for the tests. */
+        fire(type) {
+            for (const fn of (this.listeners && this.listeners[type]) || []) fn({ type });
+        }
     }
 
     const win = {
@@ -58,6 +66,8 @@ function createFakeWindow({ harness, files, pathname = '/', source, storage = { 
         setTimeout: (fn, ms) => setTimeout(fn, ms / 1000),
         clearTimeout: (id) => clearTimeout(id),
         DOMException,
+        ReadableStream,
+        Response,
         CustomEvent: FakeCustomEvent,
         XMLHttpRequest: FakeXHR,
         navigator: { sendBeacon(url) { beacons.push(url); return true; } },

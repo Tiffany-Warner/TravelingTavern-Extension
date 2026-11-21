@@ -2,7 +2,7 @@
 
 ## Session Lease `v0.2.0`
 
-**Status:** Slices 1–4 and the `freeze` release fix merged into `dev`; next: slice 5 (`feature/lease-busy`)
+**Status:** Slices 1–5 and the `freeze` release fix merged into `dev`; next: slice 6 (`feature/lease-reopen`)
 **Spec:** `context/specs/ext-0.2-session-lease-spec.md` (E1–E14). App side: TravelingTavern's `session-lease-app-spec.md` (A1–A10)
 **Requirements and evidence:** `context/decisions/session-lease-spike.md` (R1–R44)
 
@@ -33,7 +33,7 @@ An idle background holder tab closed without a release marker, twice (likely Chr
 
 ### Order
 
-1. [ ] Slices 1–6, each merged into `dev` (1–4 done)
+1. [ ] Slices 1–6, each merged into `dev` (1–5 done)
 2. [ ] Tag **`v0.2.0-rc.1`** on `dev`, push the tag
 3. [ ] App: its feature branch pins `v0.2.0-rc.1`; `0.1.20` implemented and tested against it (app spec checklist)
 4. [ ] `chore/release-0.2.0`: full E14 checklist on the test install against the rc; `manifest.json` → `0.2.0`; README; history entry
@@ -53,6 +53,12 @@ An idle background holder tab closed without a release marker, twice (likely Chr
 - The TravelingTavern app is blocked on `v0.2.0-rc.1`
 
 ## History
+
+### 2026-11-21 — Session lease slice 5: `busy` from generation requests
+- Generation requests (`/api/backends/*/generate`, NovelAI, Horde text) are sent only after `busy: true` is confirmed; overlapping replies share it; `busy: false` once the last response is over (body read, closed, error or Stop, never at the headers). A `busy: true` that can't be written rejects the request with `AbortError` and `leaseNotice` `replyNotStarted`. Endpoints and ST's full body reads confirmed in 1.19.0 / 1.19.1
+- Review fixes: a `busy` write queued behind the page's own epoch bump parked the holder as `lost`; it now retries once with the newer pair. Bumps on resume and in the app's foreground write `busy` from the page's own replies (a stale `busy: true` survived a freeze)
+- Horde replies are asynchronous (submit, then polls), so `busy` covers only the submit: an E13 known limit
+- Verified against SillyTavern 1.19.1 in Chrome on the separate test install with a local mock model (streamed reply, Stop, no model, takeover while generating, save queued before a takeover); unverified: real backends (incl. NovelAI, Kobold, Horde), the `Response` rebuild fallback, the app. `LEASE_VERSION` 1
 
 ### 2026-11-21 — Lease release on `freeze`; resume checks the pair
 - A desktop holder also releases on the Page Lifecycle `freeze` (a frozen tab may be discarded, which fires no `pagehide`). On `resume` it runs the app's foreground holder check: unchanged pair → bump, verify, holder again without a reload; changed → `lost`; unreadable → `unreadable`; requests wait for it. Back/forward cache keeps park-and-reload
