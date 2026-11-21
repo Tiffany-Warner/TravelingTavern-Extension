@@ -87,8 +87,18 @@ const OVERLAY_CSS = `
     width: 100%;
     margin: 0;
     padding: 12px 16px;
+    border: 1px solid var(--SmartThemeQuoteColor);
     border-radius: 12px;
+    background-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 25%, var(--SmartThemeBlurTintColor));
+    color: var(--SmartThemeBodyColor);
+    filter: none;
     font-size: 1.1em;
+}
+/* The dialog prefix outranks ST's \`.menu_button:not(.disabled):not([disabled]):focus-visible\` fill. */
+dialog.${CSS_PREFIX}-overlay .${CSS_PREFIX}-button.menu_button:hover,
+dialog.${CSS_PREFIX}-overlay .${CSS_PREFIX}-button.menu_button:focus-visible {
+    background-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 40%, var(--SmartThemeBlurTintColor));
+    outline: none;
 }
 .${CSS_PREFIX}-overlay .${CSS_PREFIX}-spinner {
     box-sizing: border-box;
@@ -194,9 +204,15 @@ function createOverlay() {
         if (shown && records.some(opened)) raise();
     });
 
+    /** Opens the dialog as the top modal with the focus on the card, not the button (showModal focuses the button). */
+    function open() {
+        dialog.showModal();
+        dialog.focus({ preventScroll: true });
+    }
+
     function raise() {
         if (dialog.open) dialog.close();
-        dialog.showModal();
+        open();
     }
 
     function build() {
@@ -205,9 +221,11 @@ function createOverlay() {
         dialog.className = `${CSS_PREFIX}-overlay`;
         dialog.setAttribute('aria-labelledby', `${CSS_PREFIX}-title`);
         dialog.setAttribute('aria-describedby', `${CSS_PREFIX}-line`);
+        // The card takes the focus (see focusCard), so the button shows its focus tint only once tabbed to.
+        dialog.tabIndex = -1;
         dialog.addEventListener('cancel', (event) => event.preventDefault());
         // Chrome can close a modal on a repeated Escape despite preventDefault: open it again.
-        dialog.addEventListener('close', () => { if (shown && !dialog.open) dialog.showModal(); });
+        dialog.addEventListener('close', () => { if (shown && !dialog.open) open(); });
         document.body.append(dialog);
     }
 
@@ -231,7 +249,7 @@ function createOverlay() {
             shown = true;
             observer.observe(document.body, { subtree: true, attributes: true, attributeFilter: ['open'] });
         }
-        if (!dialog.open) dialog.showModal();
+        if (!dialog.open) open();
     }
 
     function hide() {
@@ -249,7 +267,7 @@ function createOverlay() {
 /** Shows one warning toast through ST's toastr, if it's there. */
 function showToast(text) {
     if (typeof window.toastr === 'undefined') return;
-    window.toastr.warning(text, 'TravelingTavern', { escapeHtml: true });
+    window.toastr.warning(text, '', { escapeHtml: true });
 }
 
 /** The untested-version toast, once per ST version (remembered per browser; in memory if storage fails). */
