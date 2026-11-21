@@ -1,16 +1,19 @@
 'use strict';
 
-// A fake SillyTavern server holding the two lease files, for the lease's tests. Invented data only.
+// A fake SillyTavern server holding the two lease files, and pages (lease instances) sharing it,
+// for the lease's tests. Invented data only.
 
 const lease = require('../../session-lease.js');
 
 /**
- * Creates a fake server, a lease wired to it, and recorders.
+ * Creates a fake server, a first page wired to it, and recorders.
  * @param {object} [options]
  * @param {object} [options.files] Initial files by name: an object (stored as JSON) or a raw string.
+ * @param {object|null} [options.storage] The first page's sessionStorage content (default: page id
+ *     `page-a`); null for a storage that throws.
  * @returns {object} Test harness.
  */
-function createHarness({ files = {} } = {}) {
+function createHarness({ files = {}, storage = { [lease.STORAGE_KEYS.tabId]: 'page-a' } } = {}) {
     const server = {
         /** File contents by name, as text. */
         files: new Map(Object.entries(files).map(([name, value]) => [name, toText(value)])),
@@ -28,10 +31,13 @@ function createHarness({ files = {} } = {}) {
         failAfterWrite: 0,
         /** Called before each upload is applied; may change server state (another page writing). */
         beforeUpload: null,
+        /** Called on every sleep with the delay; may change server state (time passing elsewhere). */
+        onSleep: null,
     };
     const uploads = [];
     const sleeps = [];
     const logs = [];
+    let clock = Date.UTC(2026, 0, 1);
     let inFlight = 0;
     let maxInFlight = 0;
 
@@ -39,7 +45,7 @@ function createHarness({ files = {} } = {}) {
         if (server.offline) throw new TypeError('Failed to fetch');
         const method = String(init.method || 'GET').toUpperCase();
         if (method === 'GET' && url.startsWith(lease.USER_FILES_PATH)) return answerRead(url.slice(lease.USER_FILES_PATH.length));
-        if (method === 'POST' && url === lease.UPLOAD_PATH) return answerUpload(JSON.parse(init.body));
+        if (method === 'POST' && url === lease.UPLOAD_PATH) return answerUpload(JSON.parse(init.body), init);
         return new Response('not found', { status: 404 });
     }
 
@@ -57,14 +63,14 @@ function createHarness({ files = {} } = {}) {
         return new Response(server.files.get(name), { status: 200 });
     }
 
-    async function answerUpload({ name, data }) {
+    async function answerUpload({ name, data }, init) {
         inFlight++;
         maxInFlight = Math.max(maxInFlight, inFlight);
         await Promise.resolve();
         try {
             if (server.beforeUpload) server.beforeUpload(name);
             const text = Buffer.from(data, 'base64').toString('utf8');
-            uploads.push({ name, value: JSON.parse(text) });
+            uploads.push({ name, value: JSON.parse(text), keepalive: init.keepalive === true });
             if (server.failUploads > 0) {
                 server.failUploads--;
                 return new Response('EPERM', { status: 500 });
@@ -80,28 +86,71 @@ function createHarness({ files = {} } = {}) {
         }
     }
 
-    const instance = lease.createSessionLease({
-        fetch: fakeFetch,
-        now: () => Date.UTC(2026, 0, 1),
-        sleep: async (ms) => { sleeps.push(ms); },
-        log: (level, message, details) => logs.push({ level, message, details }),
-    });
+    /**
+     * A page load on this server: its own lease instance, sessionStorage and reports.
+     * @param {object|null} storageContent sessionStorage content (pass the same object's entries for a
+     *     refresh in the same tab), or null for a storage that throws.
+     * @returns {{ lease: object, posts: object[], storage: object }} The page.
+     */
+    function newPage(storageContent) {
+        const pageStorage = storageContent === null ? brokenStorage() : fakeStorage(storageContent);
+        const posts = [];
+        const instance = lease.createSessionLease({
+            fetch: fakeFetch,
+            post: (type, payload) => posts.push(Object.assign({ type }, payload)),
+            now: () => clock,
+            sleep: async (ms) => {
+                sleeps.push(ms);
+                clock += ms;
+                if (server.onSleep) server.onSleep(ms);
+            },
+            storage: pageStorage,
+            log: (level, message, details) => logs.push({ level, message, details }),
+        });
+        return { lease: instance, posts, storage: pageStorage };
+    }
+
+    const first = newPage(storage);
 
     return {
-        lease: instance,
+        lease: first.lease,
+        posts: first.posts,
+        storage: first.storage,
+        newPage,
         server,
         uploads,
         sleeps,
         logs,
         maxInFlight: () => maxInFlight,
+        /** Lease writes only (not the release marker). */
+        leaseUploads: () => uploads.filter((u) => u.name === lease.LEASE_FILE),
         /** The lease file as stored, parsed. */
         leaseFile: () => JSON.parse(server.files.get(lease.LEASE_FILE)),
+        /** The release marker as stored, parsed. */
+        markerFile: () => JSON.parse(server.files.get(lease.RELEASE_FILE)),
         setFile: (name, value) => server.files.set(name, toText(value)),
     };
 }
 
 function toText(value) {
     return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
+/** sessionStorage over a Map. */
+function fakeStorage(content = {}) {
+    const map = new Map(Object.entries(content));
+    return {
+        map,
+        getItem: (key) => (map.has(key) ? map.get(key) : null),
+        setItem: (key, value) => { map.set(key, String(value)); },
+        removeItem: (key) => { map.delete(key); },
+    };
+}
+
+/** sessionStorage that throws (blocked site data). */
+function brokenStorage() {
+    const fail = () => { throw new Error('SecurityError'); };
+    return { map: new Map(), getItem: fail, setItem: fail, removeItem: fail };
 }
 
 /**
@@ -129,4 +178,11 @@ function markerFile(fields = {}) {
     return Object.assign({ format: 1, holder: 'page-a', epoch: 3, releasedAt: '2026-01-01T00:00:00.000Z' }, fields);
 }
 
-module.exports = { createHarness, leaseFile, markerFile, LEASE: lease.LEASE_FILE, MARKER: lease.RELEASE_FILE };
+module.exports = {
+    createHarness,
+    leaseFile,
+    markerFile,
+    LEASE: lease.LEASE_FILE,
+    MARKER: lease.RELEASE_FILE,
+    KEYS: lease.STORAGE_KEYS,
+};

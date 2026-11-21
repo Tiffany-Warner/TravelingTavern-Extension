@@ -2,7 +2,7 @@
 
 ## Session Lease `v0.2.0`
 
-**Status:** Slice plan approved; slice 1 (`feature/lease-core`) in progress
+**Status:** Slice 1 merged into `dev`; slice 2 (`feature/lease-claim`) pushed for review
 **Spec:** `context/specs/ext-0.2-session-lease-spec.md` (E1–E14). App side: TravelingTavern's `session-lease-app-spec.md` (A1–A10)
 **Requirements and evidence:** `context/decisions/session-lease-spike.md` (R1–R44)
 

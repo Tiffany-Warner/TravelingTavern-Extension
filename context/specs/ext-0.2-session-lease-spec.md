@@ -42,7 +42,7 @@ Two small JSON files in the SillyTavern (ST) user's files. They belong to one ST
 | Field | Type | Meaning |
 |---|---|---|
 | `format` | integer | File format, currently **`1`** (below) |
-| `holder` | string | Page id of the holder: one per tab (per page in the app), kept in `sessionStorage` for that origin, so a refresh keeps it; random, no personal data |
+| `holder` | string | Page id of the holder: **`<tab id>.<load id>`**. The tab id is one per tab (per page in the app), kept in `sessionStorage` for that origin, so a refresh keeps it and a duplicated tab copies it; the load id is new on every page load. Both random, no personal data, no dot inside either. Pairs compare the whole holder; only the start decision looks at the tab part (E4) |
 | `epoch` | integer ≥ 1 | Counts claims. Every claim writes `epoch + 1`; a holder that must invalidate its own release marker bumps it to `epoch + 1` with itself as holder (E5, A5). Never compared alone: see the pair rule |
 | `claimedAt` | string (ISO 8601) | Informational only |
 | `busy` | boolean | The holder is generating a reply (E8). Claimers wait for it to clear (E4) |
@@ -116,9 +116,10 @@ No decision uses a clock time from the files: devices' clocks differ (seconds ap
 
 **Start decision** (every page load; requests wait for it, E6):
 
-- Lease names this page's id: a refresh, or a duplicated tab that copied `sessionStorage`. **Always bump the epoch** to `(own id, epoch + 1)`, with `busy: false` (no reply can be running in a fresh load), and verify (pair rule, E2) before becoming holder. The newest load with that id wins; an older page with the same id fails its next pair check and parks
-- **A duplicated tab** bumps the epoch like a refresh, so it takes over from the original without a click, and the original parks at its next write. This is intended: it prevents two holders with the same page id
-- No lease, or the lease is released → **automatic claim** (steps 1–6, no click), at most once per tab between successful loads (a `sessionStorage` mark prevents a reload loop)
+- Lease's holder has this tab's id as its tab part (everything before the first dot): a refresh, or a duplicated tab that copied `sessionStorage`. **Always bump the epoch** to `(this load's holder, epoch + 1)`, with `busy: false` (no reply can be running in a fresh load), and verify after the grace (pair rule, E2) before becoming holder. The newest load in that tab wins; an older page of the same tab fails its next pair check and parks. Because each load has its own holder, two loads of one tab can never write and verify the same pair (e.g. the original's Use here claim and the duplicate's bump, both at `epoch + 1`)
+- **A duplicated tab** bumps the epoch like a refresh, so it takes over from the original without a click, and the original parks at its next write. This is intended
+- On desktop, SillyTavern's first reads happen before the extension loads (E6), so the start bump's grace doesn't fully cover a save a duplicated tab's original still has in flight
+- No lease, or the lease is released → **automatic claim** (steps 1–6, no click), at most once per tab between successful loads (a `sessionStorage` mark prevents a reload loop). The mark is cleared when a load becomes holder, and when the automatic claim ends without a reload (parked, lost race), so a later load in that tab can claim a free lease again
 - Otherwise → parked (`held`). Lease or marker unreadable → parked (`unreadable`)
 
 **Reopen the chat** (R10, R30): after a reload that follows any claim (Use here or automatic), once ST fires `APP_READY` and the page is holder, read `active` and open it with ST's context functions: group → `openGroupChat(groupId, chatFile)` **(verify)**; character → `selectCharacterById(index of avatar)` **(verify)**, then `openCharacterChat(chatFile)` **(verify)** if that chat isn't already open. A character or group that no longer exists → stay on ST's start screen (logged). While the reopen flag is set, ST's startup `CHAT_CHANGED` with no chat doesn't overwrite `active`.
@@ -255,7 +256,7 @@ Posted as JSON strings to the app's `TravelingTavern` listener, main frame only,
 |---|---|---|
 | `state` | `"holder"` or `"parked"` | |
 | `reason` | string or `null` | `null` when holder. Parked: `"held"` (another page holds the lease), `"lost"` (this page lost it), `"claiming"`, `"waitingForReply"` (claiming, waiting for the other page's `busy` to clear: R29), `"lostRace"` (another page claimed first), `"unreadable"`, `"unknownFormat"` (a lease file in a newer format: this page's own copy is outdated, so in the app's page the app needs an update: E2) |
-| `pageId` | string | This page's `holder` id |
+| `pageId` | string | This load's `holder` id (`<tab id>.<load id>`) |
 | `epoch` | integer or `null` | The epoch this page holds; `null` if it never held the lease in this load |
 | `busy` | boolean | This page is generating a reply |
 | `connected` | boolean | ST is connected to a model (`onlineStatus` isn't `no_connection`); the app shows its notice when a holder reports `false` after a takeover (E10, A7) |
