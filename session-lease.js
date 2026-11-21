@@ -1194,7 +1194,8 @@
             if (markerRead.kind === 'unknownFormat') return park(PARK_REASON.unknownFormat);
             const verified = decideVerify(leaseRead, pair, PARK_REASON.lost);
             if (!verified.ok) return park(verified.reason);
-            const outcome = await bumpEpoch(pair, {});
+            // `busy` from this page's own generations: a reply that ended while released left none.
+            const outcome = await bumpEpoch(pair, { busy: page.generations > 0 });
             if (outcome.status === 'parked') return park(outcome.reason);
             const next = { holder: pair.holder, epoch: pair.epoch + 1 };
             await sleep(GRACE_MS);
@@ -1215,12 +1216,12 @@
          */
         async function beginGeneration() {
             if (page.phase !== PHASE.holder) return { status: 'hold' };
-            const pair = page.pair;
             page.generations++;
-            if (!page.busyWrite) page.busyWrite = updateLease(pair, { busy: true });
+            if (!page.busyWrite) page.busyWrite = writeBusy(page.pair, true);
             let outcome;
+            let pair;
             try {
-                outcome = await page.busyWrite;
+                ({ outcome, pair } = await page.busyWrite);
             } catch (error) {
                 outcome = { status: 'parked', reason: PARK_REASON.unreadable };
             }
@@ -1244,6 +1245,24 @@
             return { status: 'hold' };
         }
 
+        /**
+         * Writes `busy` for this page's pair. If the write found the lease at a newer pair of this page's
+         * own (its epoch bump, e.g. onForeground, landed first in the queue), it retries once with that
+         * pair, as the gate's check does; anything else is left to the caller.
+         * @param {{ holder: string, epoch: number }} pair The pair the write starts from.
+         * @param {boolean} busy The value to write.
+         * @returns {Promise<{ outcome: object, pair: object }>} The update's outcome and the pair it used.
+         */
+        async function writeBusy(pair, busy) {
+            const outcome = await updateLease(pair, { busy });
+            const ownNewerPair = outcome.status === 'parked' && outcome.reason === PARK_REASON.lost
+                && page.phase === PHASE.holder && page.pair !== null
+                && page.pair.holder === pair.holder && page.pair.epoch > pair.epoch;
+            if (!ownNewerPair) return { outcome, pair };
+            const retryPair = page.pair;
+            return { outcome: await updateLease(retryPair, { busy }), pair: retryPair };
+        }
+
         /** Counts a generation as over without writing; the last one forgets the shared write. */
         function dropGeneration() {
             page.generations = Math.max(0, page.generations - 1);
@@ -1263,8 +1282,12 @@
             page.busy = false;
             report();
             if (page.phase !== PHASE.holder) return;
-            const outcome = await updateLease(page.pair, { busy: false });
-            if (outcome.status === 'parked') park(outcome.reason);
+            try {
+                const { outcome } = await writeBusy(page.pair, false);
+                if (outcome.status === 'parked') park(outcome.reason);
+            } catch (error) {
+                failed('busy clear', error);
+            }
         }
 
         // ---- Requests and the app's hooks (spec E6, E11) ---------------------------------------
@@ -1403,7 +1426,8 @@
                 page.verifiedAt = now();
                 return { status: 'holder', pair };
             }
-            const outcome = await bumpEpoch(pair, {});
+            // `busy` from this page's own generations: a reply that ended while released left none.
+            const outcome = await bumpEpoch(pair, { busy: page.generations > 0 });
             if (!stillHolds(pair)) return notHolderAnyMore();
             if (outcome.status === 'parked') return park(outcome.reason);
             const next = { holder: pair.holder, epoch: pair.epoch + 1 };

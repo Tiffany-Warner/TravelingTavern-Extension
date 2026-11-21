@@ -6,7 +6,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { isGeneration } = require('../session-lease.js');
-const { createHarness, leaseFile, LEASE } = require('./helpers/fake-server.cjs');
+const { createHarness, leaseFile, markerFile, LEASE, MARKER } = require('./helpers/fake-server.cjs');
 const { createFakeWindow, flush, track } = require('./helpers/fake-window.cjs');
 
 const GENERATE = '/api/backends/chat-completions/generate';
@@ -105,6 +105,66 @@ test('a parked page holds generations; an end after parking writes nothing', asy
     const uploads = h.uploads.length;
     await h.lease.endGeneration();
     assert.strictEqual(h.uploads.length, uploads);
+});
+
+test('busy true queued behind the page’s own foreground bump retries with the new pair (no false park)', async () => {
+    const h = await holderHarness();
+    const me = h.lease.pageId();
+    h.setFile(MARKER, markerFile({ holder: me, epoch: 4 }));
+    let begin = null;
+    h.server.afterUpload = (name) => {
+        if (name === LEASE && h.leaseFile().epoch === 5 && begin === null) begin = h.lease.beginGeneration();
+    };
+    const foreground = await h.lease.onForeground();
+    assert.strictEqual(foreground.status, 'holder');
+    assert.deepStrictEqual(await begin, { status: 'send' });
+    assert.deepStrictEqual([h.lease.status().phase, h.lease.status().pair.epoch], ['holder', 5]);
+    assert.deepStrictEqual([h.leaseFile().holder, h.leaseFile().epoch, h.leaseFile().busy], [me, 5, true]);
+});
+
+test('busy false queued behind the page’s own foreground bump retries with the new pair (no false park)', async () => {
+    const h = await holderHarness();
+    const me = h.lease.pageId();
+    assert.deepStrictEqual(await h.lease.beginGeneration(), { status: 'send' });
+    h.setFile(MARKER, markerFile({ holder: me, epoch: 4 }));
+    let end = null;
+    h.server.afterUpload = (name) => {
+        if (name === LEASE && h.leaseFile().epoch === 5 && end === null) end = h.lease.endGeneration();
+    };
+    assert.strictEqual((await h.lease.onForeground()).status, 'holder');
+    await end;
+    assert.deepStrictEqual([h.lease.status().phase, h.lease.status().pair.epoch], ['holder', 5]);
+    assert.deepStrictEqual([h.leaseFile().epoch, h.leaseFile().busy], [5, false]);
+});
+
+test('a reply that ended while released on freeze: resume’s bump writes busy false, not the stale true', async () => {
+    const h = await holderHarness();
+    await h.lease.beginGeneration();
+    assert.strictEqual(h.leaseFile().busy, true);
+    await h.lease.release('freeze');
+    await h.lease.endGeneration();
+    assert.strictEqual(h.leaseFile().busy, true, 'nothing written while released');
+    assert.strictEqual((await h.lease.resumeAfterFreeze()).status, 'holder');
+    assert.deepStrictEqual([h.leaseFile().epoch, h.leaseFile().busy], [5, false]);
+});
+
+test('a reply still running across freeze and resume keeps busy true in the bump', async () => {
+    const h = await holderHarness();
+    await h.lease.beginGeneration();
+    await h.lease.release('freeze');
+    assert.strictEqual((await h.lease.resumeAfterFreeze()).status, 'holder');
+    assert.deepStrictEqual([h.leaseFile().epoch, h.leaseFile().busy], [5, true]);
+    await h.lease.endGeneration();
+    assert.strictEqual(h.leaseFile().busy, false);
+});
+
+test('the foreground bump writes busy from the page’s own generations: a stale busy true is cleared', async () => {
+    const h = await holderHarness();
+    const me = h.lease.pageId();
+    h.setFile(LEASE, leaseFile({ holder: me, epoch: 4, busy: true }));
+    h.setFile(MARKER, markerFile({ holder: me, epoch: 4 }));
+    assert.strictEqual((await h.lease.onForeground()).status, 'holder');
+    assert.deepStrictEqual([h.leaseFile().epoch, h.leaseFile().busy], [5, false]);
 });
 
 test('wrapper: the generation request reaches ST only after busy true is in the lease', async () => {
