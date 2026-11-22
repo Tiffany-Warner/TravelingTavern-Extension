@@ -24,9 +24,12 @@ class FakeCustomEvent {
  * @param {object|null} [options.storage] sessionStorage content (default: tab id `page-a`).
  * @param {boolean} [options.app] Adds the app's `TravelingTavern` listener.
  * @param {boolean} [options.frame] Makes it a child frame.
+ * @param {number} [options.holdTimer] Timers with this delay don't run; the test fires them
+ *     (`fireHeldTimers`).
  * @returns {object} The window and recorders.
  */
-function createFakeWindow({ harness, files, pathname = '/', source, storage = { 'tt-lease-tab-id': 'page-a' }, app = false, frame = false } = {}) {
+function createFakeWindow({ harness, files, pathname = '/', source, storage = { 'tt-lease-tab-id': 'page-a' }, app = false, frame = false, holdTimer = null } = {}) {
+    const heldTimers = [];
     const h = harness || createHarness({ files });
     const listeners = new Map();
     const docListeners = new Map();
@@ -63,7 +66,7 @@ function createFakeWindow({ harness, files, pathname = '/', source, storage = { 
         location: { pathname, origin: 'http://localhost', reloads: 0, reload() { win.location.reloads++; } },
         fetch: (url, init) => h.fetch(url, init),
         sessionStorage: fakeStorage(storage || {}),
-        setTimeout: (fn, ms) => setTimeout(fn, ms / 1000),
+        setTimeout: (fn, ms) => (ms === holdTimer ? heldTimers.push(fn) : setTimeout(fn, ms / 1000)),
         clearTimeout: (id) => clearTimeout(id),
         DOMException,
         ReadableStream,
@@ -100,6 +103,10 @@ function createFakeWindow({ harness, files, pathname = '/', source, storage = { 
         beacons,
         newXhr: () => { const xhr = new win.XMLHttpRequest(); xhrs.push(xhr); return xhr; },
         install: () => install(win),
+        /** Timers held by `holdTimer` that haven't run. */
+        heldTimers: () => heldTimers.length,
+        /** Runs the timers held by `holdTimer`. */
+        fireHeldTimers: () => { for (const fn of heldTimers.splice(0)) fn(); },
         /** Fires a window event (pagehide, pageshow, tt-extension-ready). */
         fire: (type, options) => win.dispatchEvent(new FakeCustomEvent(type, options)),
         /** Fires a document event (the Page Lifecycle's freeze and resume). */

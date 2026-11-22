@@ -2,15 +2,15 @@
 
 ## Session Lease `v0.2.0`
 
-**Status:** `v0.2.0-rc.3` tagged (rc.2: ST hooks in the app's page; rc.3: `onForeground` always reports); the app builds against it (slice 10)
+**Status:** `v0.2.0-rc.3` tagged (rc.2: ST hooks in the app's page; rc.3: `onForeground` always reports); the app builds against it (slice 10). Next: `v0.2.0-rc.4` (`busy` until the chat save after a reply, `fix/busy-until-chat-save`) for the app's re-pin
 **Spec:** `context/specs/ext-0.2-session-lease-spec.md` (E1–E15). App side: TravelingTavern's `session-lease-app-spec.md` (A1–A10)
 **Requirements and evidence:** `context/decisions/session-lease-spike.md` (R1–R44)
 
 ### Order
 
 1. [x] Slices 1–6, each merged into `dev`
-2. [x] Tag **`v0.2.0-rc.1`** on `dev`, push the tag (fixes from the app's testing: `v0.2.0-rc.2`, `v0.2.0-rc.3`)
-3. [ ] App: its feature branch pins the latest rc (`v0.2.0-rc.3`); `0.1.20` implemented and tested against it (app spec checklist); in progress, at slice 10
+2. [x] Tag **`v0.2.0-rc.1`** on `dev`, push the tag (fixes from the app's testing: `v0.2.0-rc.2`, `v0.2.0-rc.3`; `v0.2.0-rc.4` pending: `busy` until the chat save)
+3. [ ] App: its feature branch pins the latest rc (`v0.2.0-rc.3`, then `v0.2.0-rc.4` and re-tests A10 item 7, decides D30); `0.1.20` implemented and tested against it (app spec checklist); in progress, at slice 10
 4. [ ] `chore/release-0.2.0`: full E14 checklist on the test install against the rc; `manifest.json` → `0.2.0`; README; history entry
 5. [ ] Release PR `dev` → `main` (`Release 0.2.0`); owner merges; tag **`v0.2.0`**
 6. [ ] App re-pins its submodule to `v0.2.0` before its merge
@@ -28,6 +28,12 @@
 - The TravelingTavern app re-pinned to `v0.2.0-rc.3` before its slice 8; rc.2 and rc.3 can only be verified there (the ST hooks attach; Kotlin's scrim clears when `onForeground()` re-posts `leaseState`)
 
 ## History
+
+### 2026-11-22 — `busy` until the chat save after a reply (for `v0.2.0-rc.4`)
+- The app's slice 10 lost a finished reply: `busy: false` went out when the response ended, the claim landed 205 ms later, and ST's chat save (0.2–1.1 s after the end, later on a hidden page) hit the new pair and was held
+- Fix: after the last reply ends, `busy` stays true until a chat save that started after that end has completed (any status), at most 3 s (then a warning). Not when no longer holder; the headers fallback is unchanged. E15: impersonate saves; errors and `quiet` don't; ST's save wait has no immediate check and can skip the save on a hidden page (E13)
+- Verified against SillyTavern 1.19.1 in Chrome on the separate test install with the mock model: three takeovers during a reply, each reply on disk 8–20 ms before `busy: false`, the claim 0.4–0.7 s after it; Stop (saved, then cleared); a failed generation (cleared at 3 s, one warning)
+- Unverified: a hidden holder tab (Claude in Chrome kept its tabs `visible` even while minimized), the app (A10 item 7 after the re-pin). `LEASE_VERSION` 1 (owner's pre-release exception, decided again at `v0.2.0`)
 
 ### 2026-11-21 — `onForeground` always reports `leaseState` (for `v0.2.0-rc.3`)
 - The app's Kotlin pre-check (A4) parks its own scrim on an unreadable or mismatched read and calls `onForeground()` for the page to confirm; a page still holder with an unchanged lease posted nothing (`report()` skips repeats), so the scrim stayed up until a Use here tap timed out

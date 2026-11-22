@@ -1,10 +1,11 @@
 'use strict';
 
-// Claim and takeover (spec E4): busy wait, claim write, grace, verify, lost race, reopen flag.
+// Claim and takeover (spec E4): busy wait (incl. the holder's chat-save wait, E8), claim write, grace,
+// verify, lost race, reopen flag.
 
 const test = require('node:test');
 const assert = require('node:assert');
-const { GRACE_MS, BUSY_WAIT_INTERVAL_MS, BUSY_WAIT_MAX_MS } = require('../session-lease.js');
+const { GRACE_MS, BUSY_WAIT_INTERVAL_MS, BUSY_WAIT_MAX_MS, SAVE_WAIT_MAX_MS } = require('../session-lease.js');
 const { createHarness, leaseFile, markerFile, LEASE, MARKER, KEYS } = require('./helpers/fake-server.cjs');
 
 /** A page parked behind page-b's lease (epoch 3). */
@@ -161,4 +162,31 @@ test('a claim write that landed despite an error answer is verified, not written
     h.server.failAfterWrite = 1;
     assert.strictEqual((await h.lease.useHere()).status, 'reload');
     assert.strictEqual(h.leaseUploads().length, 1);
+});
+
+test('a claimer waiting on busy claims only after the holder’s chat save after the reply (spec E8)', async () => {
+    const h = createHarness({ files: { [LEASE]: leaseFile({ holder: 'page-a', epoch: 3 }) } });
+    assert.strictEqual((await h.lease.start()).status, 'holder');
+    const claimer = h.newPage({ [KEYS.tabId]: 'page-c' });
+    assert.strictEqual((await claimer.lease.start()).status, 'parked');
+    h.server.sleepGate = (ms) => (ms === SAVE_WAIT_MAX_MS ? new Promise(() => {}) : null);
+    await h.lease.beginGeneration();
+    h.lease.endGeneration({ path: '/api/backends/chat-completions/generate' });
+    const save = h.lease.chatSaveMark();
+    let waits = 0;
+    const busyWhileWaiting = [];
+    h.server.onSleep = (ms) => {
+        if (ms !== BUSY_WAIT_INTERVAL_MS) return;
+        waits++;
+        if (waits <= 2) busyWhileWaiting.push(h.leaseFile().busy);
+        if (waits === 2) h.lease.chatSaveDone(save);
+    };
+    const outcome = await claimer.lease.useHere();
+    assert.strictEqual(outcome.status, 'reload');
+    assert.deepStrictEqual(busyWhileWaiting, [true, true], 'the reply had ended; busy waited for the save');
+    const writes = h.leaseUploads().map((u) => [u.value.holder, u.value.epoch, u.value.busy]);
+    const cleared = writes.findIndex(([holder, , busy]) => holder === h.lease.pageId() && busy === false);
+    const claimed = writes.findIndex(([holder]) => holder === claimer.lease.pageId());
+    assert.ok(cleared >= 0 && claimed > cleared, 'busy false after the save, then the claim');
+    assert.deepStrictEqual(writes.at(-1), [claimer.lease.pageId(), 5, false]);
 });

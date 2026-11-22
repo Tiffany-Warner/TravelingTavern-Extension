@@ -19,7 +19,7 @@ How to write the code. The rules it serves (fail closed, held never refused, no 
 ## Timers and Waiting
 
 - **No polling and no repeating timers.** React to events (ST's events, `pagehide` / `pageshow`, `freeze` / `resume`, requests passing the wrapper)
-- **Bounded one-off delays are allowed:** the lease-write retry (random 100–200 ms, at most 3 attempts), the claim's grace wait (1 s), ST's `/csrf-token` waiting for the lease's own token fetch (at most 2 s), the reload's one-task wait (`setTimeout(0)`) and its `reloadPending` fallback (2.5 s), the connect wait after a takeover (10 s, once per claim, ended early by `ONLINE_STATUS_CHANGED`; spec E10), and the ST hooks' retry on `load` (`setTimeout(0)`, once; spec E10). Each has a fixed bound and runs once per event
+- **Bounded one-off delays are allowed:** the lease-write retry (random 100–200 ms, at most 3 attempts), the claim's grace wait (1 s), ST's `/csrf-token` waiting for the lease's own token fetch (at most 2 s), the reload's one-task wait (`setTimeout(0)`) and its `reloadPending` fallback (2.5 s), the connect wait after a takeover (10 s, once per claim, ended early by `ONLINE_STATUS_CHANGED`; spec E10), the ST hooks' retry on `load` (`setTimeout(0)`, once; spec E10), and the chat-save wait after a reply (3 s, once per reply end, ended early by the chat save; spec E8). Each has a fixed bound and runs once per event
 - **The single named polling exception:** the claim's wait for `busy` re-reads the lease once per second, for at most 60 s, only during a claim. Another exception needs the owner's approval and a line here
 
 ## Lease Structure
