@@ -18,7 +18,7 @@
 7. **Merge** into `dev` and push `dev`. Never merge or push to `main`
 8. **Delete** the branch after merging (ask first)
 9. **Review** AI-written code periodically and on request
-10. Mark complete in current-feature.md with a 3–5 line history entry (what changed, key decisions, gotchas, what's unverified, version); no test logs or counts
+10. Mark complete in current-feature.md with a 3–5 line history entry (what changed, key decisions, gotchas, what's unverified, version); no test logs or counts. New entries go at the top of both `context/history.md` and current-feature.md; current-feature.md keeps only the latest 3 (drop its oldest when adding one)
 
 ## Branches
 
@@ -52,7 +52,7 @@ The repo is public. Nothing identifying my network, devices or accounts in any c
 
 ## Investigating SillyTavern
 
-- Never guess an endpoint, request / response shape, export, setting or DOM id. Confirm it in SillyTavern's source or the live page (DevTools) first, and write the finding into the spec's Verified section with the version checked
+- Never guess an endpoint, request / response shape, export, setting or DOM id. Confirm it in SillyTavern's source or the live page (DevTools) first, and write the finding into `context/specs/ext-0.2-st-source-notes.md` with the version checked
 - All of it on the test install only (`CLAUDE.md` Hard Rules): throwaway persona, lorebook, character and chat
 
 ## Code Changes
@@ -65,4 +65,4 @@ The repo is public. Nothing identifying my network, devices or accounts in any c
 
 Check AI-written code against `CLAUDE.md` Hard Rules and `coding-standards.md`, and also for:
 
-- **Spec drift:** the spec, its Verified section and the unit tests change in the same branch as the behavior they describe
+- **Spec drift:** the spec, the ST source notes (`ext-0.2-st-source-notes.md`) and the unit tests change in the same branch as the behavior they describe

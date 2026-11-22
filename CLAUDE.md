@@ -45,7 +45,7 @@ No build step. To try a change, install the branch on the **test install** and h
 - **Don't change SillyTavern's look or behavior** beyond parking, the overlay and the spec's toasts; never modify its code
 - **Keep the repo and folder name `TravelingTavern-Extension`:** SillyTavern installs into it and the app's install calls use it
 - **Keep the names the app depends on** (spec E11): `window.__ttLease` (`version`, `source`, `useHere`, `onForeground`), `window.__ttLeaseSource`, `window.__ttExtension` (`version`, `leaseVersion`), the `tt-extension-ready` and `tt-lease` events (incl. `type`), the `leaseState`, `leaseInfo` and `leaseNotice` messages and fields, and both lease files and fields. Ask before changing one, and bump `LEASE_VERSION`
-- **Every endpoint list is in the spec** (allowlist, chat saves, generation, connect buttons). On a new SillyTavern version, re-check them in its source and run the checklist before widening `TESTED_ST_VERSIONS`
+- **Every endpoint list is in the spec** (allowlist, chat saves, generation, connect buttons). On a new SillyTavern version, re-check them in its source (findings: `context/specs/ext-0.2-st-source-notes.md`) and run the checklist before widening `TESTED_ST_VERSIONS`
 - **Never test against real data.** Every manual test, spike and cleanup runs on the separate **test install** (own folder, data and port), never the **real server**; no unreleased lease code ever goes on the real server, not even for a quick check. Throwaway characters aren't enough: user files and extension data are shared by the whole install (the spike's cleanup overwrote real Memory Books files this way)
 - **The repo is public:** nothing private anywhere (`ai-guidelines.md` → Private Data)
 
