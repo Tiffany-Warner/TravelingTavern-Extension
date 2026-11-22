@@ -40,7 +40,7 @@ Spec: `context/specs/ext-0.2-session-lease-spec.md`. Decision and evidence: `con
 - [x] Slice 4: overlay and toasts (E9, E12)
 - [x] Slice 5: `busy` from generation requests (E8)
 - [x] Slice 6: reopen and reconnect after a takeover (E4, E10)
-- [ ] Tag `v0.2.0-rc.1` on `dev` for the app to build and test against
+- [x] Tag `v0.2.0-rc.1` on `dev` for the app to build and test against (`rc.2`–`rc.4` tagged for the app's fixes)
 - [ ] Full manual checklist on the test install against the rc (E14)
 - [ ] Release to `main`, tag `v0.2.0`
 
@@ -85,7 +85,9 @@ The spec's Known Limits (E13), with what would close each.
 | `CLAUDE.md` | Stack, versioning, Hard Rules |
 | `context/ai-guidelines.md` | Workflow, branches, releases, private data, commits |
 | `context/coding-standards.md` | How to write the code: timers, lease structure, wrapper, logging, tests |
-| `context/current-feature.md` | Active feature, release order, history |
+| `context/current-feature.md` | Active feature, release order, latest history |
+| `context/history.md` | All history entries, newest first |
 | `context/project-schema.md` | This file: phases and roadmap |
 | `context/specs/ext-0.2-session-lease-spec.md` | The session lease (E1–E15) |
+| `context/specs/ext-0.2-st-source-notes.md` | SillyTavern source findings per version (spec E15) |
 | `context/decisions/session-lease-spike.md` | The decision, the spike's verdict, requirements R1–R44 and their map |
