@@ -2,15 +2,15 @@
 
 ## Session Lease `v0.2.0`
 
-**Status:** `v0.2.0-rc.2` tagged; `fix/lease-foreground-report` (`onForeground` always reports) for `v0.2.0-rc.3`
+**Status:** `v0.2.0-rc.3` tagged (rc.2: ST hooks in the app's page; rc.3: `onForeground` always reports); the app builds against it (slice 10)
 **Spec:** `context/specs/ext-0.2-session-lease-spec.md` (E1–E15). App side: TravelingTavern's `session-lease-app-spec.md` (A1–A10)
 **Requirements and evidence:** `context/decisions/session-lease-spike.md` (R1–R44)
 
 ### Order
 
 1. [x] Slices 1–6, each merged into `dev`
-2. [ ] Tag **`v0.2.0-rc.1`** on `dev`, push the tag
-3. [ ] App: its feature branch pins `v0.2.0-rc.1`; `0.1.20` implemented and tested against it (app spec checklist)
+2. [x] Tag **`v0.2.0-rc.1`** on `dev`, push the tag (fixes from the app's testing: `v0.2.0-rc.2`, `v0.2.0-rc.3`)
+3. [ ] App: its feature branch pins the latest rc (`v0.2.0-rc.3`); `0.1.20` implemented and tested against it (app spec checklist); in progress, at slice 10
 4. [ ] `chore/release-0.2.0`: full E14 checklist on the test install against the rc; `manifest.json` → `0.2.0`; README; history entry
 5. [ ] Release PR `dev` → `main` (`Release 0.2.0`); owner merges; tag **`v0.2.0`**
 6. [ ] App re-pins its submodule to `v0.2.0` before its merge
@@ -25,7 +25,7 @@
 
 - **Per-save guard stopped** 2026-11-20 (owner decision); its spec and code are kept in the `archive/save-guard` tag
 - Desktop notices: `tt-lease` carries `{ type, ...fields }` (`leaseState`, `leaseInfo`, `leaseNotice`); the app gets `leaseNotice` too (E11, A7)
-- The TravelingTavern app is blocked on `v0.2.0-rc.1`
+- The TravelingTavern app re-pinned to `v0.2.0-rc.3` before its slice 8; rc.2 and rc.3 can only be verified there (the ST hooks attach; Kotlin's scrim clears when `onForeground()` re-posts `leaseState`)
 
 ## History
 
