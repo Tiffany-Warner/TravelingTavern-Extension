@@ -1572,9 +1572,22 @@
         /**
          * The app returned to the foreground (spec E11, app A5). Holder: confirm the lease, bump the epoch
          * if its release marker matches, else park. Parked: claim only if the lease is released or gone.
+         * Always reports `leaseState` (unless a reload follows), unchanged too: the app's pre-check (A4)
+         * may have parked its own scrim and waits for the page to confirm.
          * @returns {Promise<{ status: string }>} holder, parked, reload (after a claim) or ignored.
          */
         async function onForeground() {
+            const before = page.lastReport;
+            const outcome = await foregroundOutcome();
+            if (outcome.status !== 'reload' && page.lastReport === before) {
+                page.lastReport = '';
+                report();
+            }
+            return outcome;
+        }
+
+        /** onForeground's decision, without the report. */
+        async function foregroundOutcome() {
             try {
                 if (page.phase === PHASE.holder) return await foregroundHolder();
                 const canClaim = page.phase === PHASE.parked && !page.claiming && !page.released

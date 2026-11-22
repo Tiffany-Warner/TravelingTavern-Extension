@@ -269,7 +269,7 @@ Frozen, defined once, no off switch.
 | `version` | `LEASE_VERSION`, an integer |
 | `source` | `'app'` or `'extension'`: which copy runs in this page |
 | `useHere()` | Use here: claims if parked and not already claiming (E4), then reloads. Returns a promise; outcome is reported through `leaseState` |
-| `onForeground()` | The app returned to the foreground. Holder: confirm the lease is still its own, bump the epoch if its release marker matches (A5), else park. Parked: claim **only if the lease is released** (R43), else stay parked. Returns a promise |
+| `onForeground()` | The app returned to the foreground. Holder: confirm the lease is still its own, bump the epoch if its release marker matches (A5), else park. Parked: claim **only if the lease is released** (R43), else stay parked. Always reports `leaseState`, even when unchanged (unless a claim's reload follows). Returns a promise |
 
 Nothing else is exposed. Neither hook takes arguments, and neither can make a parked page writable without a claim and a fresh load (R4).
 
@@ -277,7 +277,7 @@ Nothing else is exposed. Neither hook takes arguments, and neither can make a pa
 
 Posted as JSON strings to the app's `TravelingTavern` listener, main frame only, in the app's envelope `{ "v": 1, "type": "...", ... }`. The app registers the listener for its saved server's origin only.
 
-**`leaseState`**: sent once the start decision is made and on every change (holder ↔ parked, a new reason, `epoch`, `busy`).
+**`leaseState`**: sent once the start decision is made, on every change (holder ↔ parked, a new reason, `epoch`, `busy`), and on every `onForeground()`, unchanged too (unless a claim's reload follows): the app's pre-check (A4) may have put up its own parked scrim and waits for the page to confirm.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -387,7 +387,7 @@ The app's own `window.__ttBridge` is not part of this contract.
 - `reload`: held chat saves aborted and ST's handlers run before the reload; a reload that doesn't happen ends in `reloadPending` (E7)
 - `busy`: generation requests sent only after `busy: true` is confirmed, `AbortError` and `replyNotStarted` when it can't be written, cleared only when the response is over, overlapping generations, writes behind the page's own bump (E8)
 - `csrf`: the lease's own CSRF token, fetched again once on 403; ST's `/csrf-token` ordered after it (E6)
-- `foreground`: `onForeground` for a holder (bump that invalidates its own marker) and a parked page (claims only a released or missing lease) (E11, app A5)
+- `foreground`: `onForeground` for a holder (bump that invalidates its own marker) and a parked page (claims only a released or missing lease); always one `leaseState`, unchanged too (E11, app A5)
 - `instance`: one instance per page, main frame only, never on the login page, frozen `window.__ttLease`, desktop-only release wiring, `index.js` versions match (E11)
 - `messages`: `leaseState`, `leaseInfo` and `leaseNotice` payloads, to the app and as `tt-lease` with `type`; no CSRF token or ST data (E11)
 - `overlay`: what `index.js` shows for each report: overlay texts, toasts (E9, E10, E12)

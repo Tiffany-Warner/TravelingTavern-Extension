@@ -2,7 +2,7 @@
 
 ## Session Lease `v0.2.0`
 
-**Status:** `v0.2.0-rc.1` tagged; `fix/st-context-retry` (ST hooks in the app's page) for `v0.2.0-rc.2`
+**Status:** `v0.2.0-rc.2` tagged; `fix/lease-foreground-report` (`onForeground` always reports) for `v0.2.0-rc.3`
 **Spec:** `context/specs/ext-0.2-session-lease-spec.md` (E1–E15). App side: TravelingTavern's `session-lease-app-spec.md` (A1–A10)
 **Requirements and evidence:** `context/decisions/session-lease-spike.md` (R1–R44)
 
@@ -28,6 +28,11 @@
 - The TravelingTavern app is blocked on `v0.2.0-rc.1`
 
 ## History
+
+### 2026-11-21 — `onForeground` always reports `leaseState` (for `v0.2.0-rc.3`)
+- The app's Kotlin pre-check (A4) parks its own scrim on an unreadable or mismatched read and calls `onForeground()` for the page to confirm; a page still holder with an unchanged lease posted nothing (`report()` skips repeats), so the scrim stayed up until a Use here tap timed out
+- Fix: `onForeground` re-posts the current `leaseState` when the call itself posted nothing (holder and parked alike; not when a claim's reload follows), so a bump or a park still posts exactly once. E11 states it
+- Unverified: the app (needs a rebuild with this code). `LEASE_VERSION` 1 (owner decision: stays until the release)
 
 ### 2026-11-21 — ST hooks attach in the app's page (for `v0.2.0-rc.2`)
 - In the app's page the lease's `load` listener ran before `script.js` resumed from its `load` wait, so `getContext()` threw a `ReferenceError` (temporal dead zone) and the hooks never attached: no `connected`, no reopen / reconnect after a takeover, no `active` from `CHAT_CHANGED`. Lease safety unaffected; desktop unaffected (the extension loads later)

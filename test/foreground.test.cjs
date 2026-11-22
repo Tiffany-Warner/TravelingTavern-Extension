@@ -22,6 +22,47 @@ test('holder, not released: stays holder, nothing written', async () => {
     assert.strictEqual(h.uploads.length, uploads);
 });
 
+test('holder, unchanged lease: posts one leaseState anyway (the app’s scrim waits for it, A4)', async () => {
+    const h = await holderHarness();
+    const epoch = h.lease.status().epoch;
+    const posts = h.posts.length;
+    await h.lease.onForeground();
+    const states = h.posts.slice(posts).filter((p) => p.type === 'leaseState');
+    assert.strictEqual(states.length, 1);
+    assert.deepStrictEqual([states[0].state, states[0].pageId, states[0].epoch], ['holder', h.lease.pageId(), epoch]);
+    // The same report() path: the same fields as the last report, and it is remembered again.
+    assert.deepStrictEqual(states[0], h.posts.slice(0, posts).filter((p) => p.type === 'leaseState').at(-1));
+    h.lease.setConnected(states[0].connected);
+    assert.strictEqual(h.posts.length, posts + 1, 'an unchanged state after it posts nothing');
+});
+
+test('before the start decision: onForeground posts nothing; the start decision then reports once', async () => {
+    const h = createHarness({ files: { [LEASE]: leaseFile({ holder: 'page-b', epoch: 3 }) } });
+    assert.deepStrictEqual(await h.lease.onForeground(), { status: 'ignored' });
+    assert.strictEqual(h.posts.filter((p) => p.type === 'leaseState').length, 0);
+    await h.lease.start();
+    const states = h.posts.filter((p) => p.type === 'leaseState');
+    assert.deepStrictEqual(states.map((p) => [p.state, p.reason]), [['parked', 'held']]);
+});
+
+test('holder whose marker matches: the bump’s leaseState is the only one (no duplicate)', async () => {
+    const h = await holderHarness();
+    h.setFile(MARKER, markerFile({ holder: h.lease.pageId(), epoch: 4 }));
+    const posts = h.posts.length;
+    await h.lease.onForeground();
+    const states = h.posts.slice(posts).filter((p) => p.type === 'leaseState');
+    assert.deepStrictEqual(states.map((p) => p.epoch), [5]);
+});
+
+test('parked page that stays parked: posts its unchanged leaseState', async () => {
+    const h = createHarness({ files: { [LEASE]: leaseFile({ holder: 'page-b', epoch: 3 }) } });
+    assert.deepStrictEqual(await h.lease.start(), { status: 'parked', reason: 'held' });
+    const posts = h.posts.length;
+    assert.deepStrictEqual(await h.lease.onForeground(), { status: 'parked', reason: 'held' });
+    const states = h.posts.slice(posts).filter((p) => p.type === 'leaseState');
+    assert.deepStrictEqual(states.map((p) => [p.state, p.reason]), [['parked', 'held']]);
+});
+
 test('holder whose release marker matches (written from Kotlin): bumps the epoch, verifies, stays holder', async () => {
     const h = await holderHarness();
     const me = h.lease.pageId();
