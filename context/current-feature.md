@@ -2,15 +2,15 @@
 
 ## Session Lease `v0.2.0`
 
-**Status:** `v0.2.0-rc.3` tagged (rc.2: ST hooks in the app's page; rc.3: `onForeground` always reports); the app builds against it (slice 10)
+**Status:** `v0.2.0-rc.3` tagged (rc.2: ST hooks in the app's page; rc.3: `onForeground` always reports); the app builds against it (slice 10). Next: `v0.2.0-rc.4` (`busy` until the chat save after a reply, `fix/busy-until-chat-save`) for the app's re-pin
 **Spec:** `context/specs/ext-0.2-session-lease-spec.md` (E1–E15). App side: TravelingTavern's `session-lease-app-spec.md` (A1–A10)
 **Requirements and evidence:** `context/decisions/session-lease-spike.md` (R1–R44)
 
 ### Order
 
 1. [x] Slices 1–6, each merged into `dev`
-2. [x] Tag **`v0.2.0-rc.1`** on `dev`, push the tag (fixes from the app's testing: `v0.2.0-rc.2`, `v0.2.0-rc.3`)
-3. [ ] App: its feature branch pins the latest rc (`v0.2.0-rc.3`); `0.1.20` implemented and tested against it (app spec checklist); in progress, at slice 10
+2. [x] Tag **`v0.2.0-rc.1`** on `dev`, push the tag (fixes from the app's testing: `v0.2.0-rc.2`, `v0.2.0-rc.3`; `v0.2.0-rc.4` pending: `busy` until the chat save)
+3. [ ] App: its feature branch pins the latest rc (`v0.2.0-rc.3`, then `v0.2.0-rc.4` and re-tests A10 item 7, decides D30); `0.1.20` implemented and tested against it (app spec checklist); in progress, at slice 10
 4. [ ] `chore/release-0.2.0`: full E14 checklist on the test install against the rc; `manifest.json` → `0.2.0`; README; history entry
 5. [ ] Release PR `dev` → `main` (`Release 0.2.0`); owner merges; tag **`v0.2.0`**
 6. [ ] App re-pins its submodule to `v0.2.0` before its merge

@@ -55,6 +55,8 @@
     /** The claim's wait for `busy`: re-read once per second for at most 60 s (spec E4, the one polling exception). */
     const BUSY_WAIT_INTERVAL_MS = 1000;
     const BUSY_WAIT_MAX_MS = 60000;
+    /** After the last reply ends, `busy` waits at most this long for ST's chat save (spec E8). */
+    const SAVE_WAIT_MAX_MS = 3000;
 
     /** A holder trusts a lease read this old for GETs and allowlisted reads (spec E6). */
     const READ_WINDOW_MS = 2000;
@@ -1018,6 +1020,10 @@
             busyWrite: null,
             /** `busy: true` is confirmed in the lease (reported as `leaseState.busy`). */
             busy: false,
+            /** How often the last generation in flight ended; a chat save notes it when it starts. */
+            generationEnds: 0,
+            /** After the last generation ended, until a chat save started since completes (spec E8). */
+            saveWait: null,
             startPromise: null,
             lastReport: '',
             /** When a lease read last confirmed this holder's pair (`now()` ms). */
@@ -1311,8 +1317,8 @@
             if (markerRead.kind === 'unknownFormat') return park(PARK_REASON.unknownFormat);
             const verified = decideVerify(leaseRead, pair, PARK_REASON.lost);
             if (!verified.ok) return park(verified.reason);
-            // `busy` from this page's own generations: a reply that ended while released left none.
-            const outcome = await bumpEpoch(pair, { busy: page.generations > 0 });
+            // `busy` from this page's own replies: a reply that ended while released left none.
+            const outcome = await bumpEpoch(pair, { busy: replyInProgress() });
             if (outcome.status === 'parked') return park(outcome.reason);
             const next = { holder: pair.holder, epoch: pair.epoch + 1 };
             await sleep(GRACE_MS);
@@ -1334,6 +1340,8 @@
         async function beginGeneration() {
             if (page.phase !== PHASE.holder) return { status: 'hold' };
             page.generations++;
+            // A new reply during the save wait: `busy` stays true, the wait starts again when it ends.
+            cancelSaveWait();
             if (!page.busyWrite) page.busyWrite = writeBusy(page.pair, true);
             let outcome;
             let pair;
@@ -1350,6 +1358,11 @@
                 return { status: 'send' };
             }
             dropGeneration();
+            // It cancelled a save wait: nothing runs now. A failed write left `busy: false` pending (E3).
+            if (page.generations === 0 && page.busy) {
+                page.busy = false;
+                report();
+            }
             if (outcome.status === 'parked') {
                 park(outcome.reason);
                 return { status: 'hold' };
@@ -1455,14 +1468,65 @@
 
         /**
          * A generation's response is over (spec E8): body fully read, stream closed, an error or a
-         * cancel. The last one writes `busy: false` (a failed write stays pending, spec E3). A page that
-         * is no longer holder writes nothing.
-         * @returns {Promise<void>}
+         * cancel. After the last one, `busy` stays true until a chat save that started after this end
+         * has completed (chatSaveDone), at most SAVE_WAIT_MAX_MS, then `busy: false` is written (a failed
+         * write stays pending, spec E3). A page that is no longer holder writes nothing.
+         * @param {object} [options]
+         * @param {string} [options.path] The generation's endpoint path, for the log.
+         * @param {boolean} [options.waitForSave=true] False writes `busy: false` at once (the headers
+         *     fallback, which can't see the end of the reply).
+         * @returns {Promise<void>} Settles once `busy: false` was handled, or a new reply took over.
          */
-        async function endGeneration() {
-            if (page.generations === 0) return;
+        function endGeneration({ path = null, waitForSave = true } = {}) {
+            if (page.generations === 0) return Promise.resolve();
             dropGeneration();
-            if (page.generations > 0) return;
+            if (page.generations > 0) return Promise.resolve();
+            // Not holder: its chat save is held and never completes, so no wait.
+            if (!waitForSave || page.phase !== PHASE.holder) return clearBusy();
+            return waitForChatSave(path);
+        }
+
+        /**
+         * Starts the wait for ST's chat save after the last reply ended (spec E8). Runs synchronously up
+         * to the bounded delay, so a save ST starts right after this end counts.
+         * @param {string|null} path The generation's endpoint path, for the log.
+         * @returns {Promise<void>} Settles when the wait is over or cancelled.
+         */
+        function waitForChatSave(path) {
+            cancelSaveWait();
+            page.generationEnds++;
+            let settle;
+            const done = new Promise((resolve) => { settle = resolve; });
+            const wait = { after: page.generationEnds, path, settle };
+            page.saveWait = wait;
+            const atLimit = () => endSaveWait(wait, true);
+            sleep(SAVE_WAIT_MAX_MS).then(atLimit, atLimit);
+            return done;
+        }
+
+        /**
+         * Ends a save wait that is still current: clears `busy`. No-op for one already ended or cancelled.
+         * @param {object} wait The wait (page.saveWait when it started).
+         * @param {boolean} atLimit True when no chat save completed within SAVE_WAIT_MAX_MS.
+         * @returns {void}
+         */
+        function endSaveWait(wait, atLimit) {
+            if (page.saveWait !== wait) return;
+            page.saveWait = null;
+            if (atLimit) log('warn', 'no chat save after the reply: busy cleared at the limit', { path: wait.path, reason: 'no save within ' + SAVE_WAIT_MAX_MS + ' ms' });
+            clearBusy().then(wait.settle);
+        }
+
+        /** Drops a running save wait without clearing `busy` (a new reply started). */
+        function cancelSaveWait() {
+            const wait = page.saveWait;
+            if (!wait) return;
+            page.saveWait = null;
+            wait.settle();
+        }
+
+        /** Writes `busy: false` for the holder; a page that is no longer holder only reports it. */
+        async function clearBusy() {
             page.busy = false;
             report();
             if (page.phase !== PHASE.holder) return;
@@ -1472,6 +1536,30 @@
             } catch (error) {
                 failed('busy clear', error);
             }
+        }
+
+        /** Whether a reply runs or its chat save is awaited: the `busy` an epoch bump writes (spec E8). */
+        function replyInProgress() {
+            return page.generations > 0 || page.saveWait !== null;
+        }
+
+        /**
+         * A chat save request starts (spec E8): call when ST sends it, before the lease check.
+         * @returns {number} Its mark, passed to chatSaveDone.
+         */
+        function chatSaveMark() {
+            return page.generationEnds;
+        }
+
+        /**
+         * A chat save request completed, whatever its status (spec E8). A save that started after the
+         * last reply ended ends the save wait; one that started earlier doesn't count.
+         * @param {number} mark From chatSaveMark when the save started.
+         * @returns {void}
+         */
+        function chatSaveDone(mark) {
+            const wait = page.saveWait;
+            if (wait && mark >= wait.after) endSaveWait(wait, false);
         }
 
         // ---- Requests and the app's hooks (spec E6, E11) ---------------------------------------
@@ -1623,8 +1711,8 @@
                 page.verifiedAt = now();
                 return { status: 'holder', pair };
             }
-            // `busy` from this page's own generations: a reply that ended while released left none.
-            const outcome = await bumpEpoch(pair, { busy: page.generations > 0 });
+            // `busy` from this page's own replies: a reply that ended while released left none.
+            const outcome = await bumpEpoch(pair, { busy: replyInProgress() });
             if (!stillHolds(pair)) return notHolderAnyMore();
             if (outcome.status === 'parked') return park(outcome.reason);
             const next = { holder: pair.holder, epoch: pair.epoch + 1 };
@@ -1662,6 +1750,8 @@
             onForeground,
             beginGeneration,
             endGeneration,
+            chatSaveMark,
+            chatSaveDone,
             recordChat,
             takeReopen,
             finishReopen,
@@ -1688,6 +1778,7 @@
                 claiming: page.claiming,
                 generations: page.generations,
                 busy: page.busy,
+                awaitingChatSave: page.saveWait !== null,
                 connected: page.connected,
                 reopenPending: page.reopen.pending,
             }),
@@ -1707,6 +1798,7 @@
         GRACE_MS,
         BUSY_WAIT_INTERVAL_MS,
         BUSY_WAIT_MAX_MS,
+        SAVE_WAIT_MAX_MS,
         STORAGE_KEYS,
         parseLease,
         parseMarker,
@@ -1854,22 +1946,45 @@
             if (!isServerData(path, method)) return ctx.originalFetch(input, init);
             const signal = requestSignal(input, init);
             const hold = () => holdFetch(ctx.held, path, signal, ctx.makeAbortError);
-            const send = () => (isGeneration(path, method)
-                ? sendGeneration(win, ctx, () => ctx.originalFetch(input, init), hold)
-                : ctx.originalFetch(input, init));
+            // A chat save notes when it started (here, before the lease check): spec E8's save wait.
+            const saveMark = isChatSave(path) ? ctx.lease.chatSaveMark() : null;
+            const send = () => {
+                if (isGeneration(path, method)) return sendGeneration(win, ctx, path, () => ctx.originalFetch(input, init), hold);
+                if (saveMark !== null) return sendChatSave(ctx, saveMark, () => ctx.originalFetch(input, init));
+                return ctx.originalFetch(input, init);
+            };
             return ctx.lease.gate(path, method).then((verdict) => (verdict === 'send' ? send() : hold()), hold);
         };
     }
 
+    /** Sends a chat save and tells the lease once it completed, whatever its status (spec E8). */
+    function sendChatSave(ctx, mark, request) {
+        const done = () => ctx.lease.chatSaveDone(mark);
+        let pending;
+        try {
+            pending = request();
+        } catch (error) {
+            done();
+            throw error;
+        }
+        return pending.then((response) => {
+            done();
+            return response;
+        }, (error) => {
+            done();
+            throw error;
+        });
+    }
+
     /**
-     * Sends a generation request only after `busy: true` is confirmed (spec E8), and clears it once the
+     * Sends a generation request only after `busy: true` is confirmed (spec E8), and ends it once the
      * response is over: body fully read or closed, an error, or a cancel (Stop). Never at the headers.
      */
-    function sendGeneration(win, ctx, request, hold) {
+    function sendGeneration(win, ctx, path, request, hold) {
         return ctx.lease.beginGeneration().then((begin) => {
             if (begin.status === 'hold') return hold();
             if (begin.status === 'abort') throw new win.DOMException('TravelingTavern: reply not started', 'AbortError');
-            const end = once(() => { ctx.lease.endGeneration(); });
+            const end = once((options) => { ctx.lease.endGeneration(Object.assign({ path }, options)); });
             let pending;
             try {
                 pending = request();
@@ -1887,10 +2002,10 @@
     /** A function that runs at most once. */
     function once(fn) {
         let done = false;
-        return () => {
+        return (...args) => {
             if (done) return;
             done = true;
-            fn();
+            fn(...args);
         };
     }
 
@@ -1929,10 +2044,11 @@
             Object.defineProperty(tracked, 'url', { value: response.url });
             return tracked;
         } catch (error) {
-            // Can't rebuild it: don't leave `busy` stuck (spec E8, R19); the reply may still stream.
+            // Can't rebuild it: don't leave `busy` stuck (spec E8, R19); the reply may still stream, so
+            // `busy: false` now, without the chat-save wait.
             log('warn', 'generation response not tracked: busy cleared at the headers');
             reader.releaseLock();
-            end();
+            end({ waitForSave: false });
             return response;
         }
     }
@@ -1972,7 +2088,7 @@
             ctx.lease.gate(target.path, target.method).then((verdict) => {
                 if (verdict !== 'send') return hold();
                 if (!generation) return sendNow();
-                return sendXhrGeneration(ctx, xhr, sendNow, hold);
+                return sendXhrGeneration(ctx, target.path, xhr, sendNow, hold);
             }, hold);
             return undefined;
         };
@@ -1982,11 +2098,11 @@
      * A generation XHR (spec E8): sent after `busy: true` is confirmed, `busy` cleared on `loadend`. If
      * `busy: true` can't be written, it's aborted (ST sees an abort, as with Stop).
      */
-    function sendXhrGeneration(ctx, xhr, sendNow, hold) {
+    function sendXhrGeneration(ctx, path, xhr, sendNow, hold) {
         return ctx.lease.beginGeneration().then((begin) => {
             if (begin.status === 'hold') return hold();
             if (begin.status === 'abort') return xhr.abort();
-            const end = once(() => { ctx.lease.endGeneration(); });
+            const end = once(() => { ctx.lease.endGeneration({ path }); });
             xhr.addEventListener('loadend', end);
             if (!sendNow()) end();
             return undefined;

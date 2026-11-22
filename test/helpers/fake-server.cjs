@@ -39,6 +39,8 @@ function createHarness({ files = {}, storage = { [lease.STORAGE_KEYS.tabId]: 'pa
         onLeaseRead: null,
         /** Called on every sleep with the delay; may change server state (time passing elsewhere). */
         onSleep: null,
+        /** When set, a sleep waits for the promise it returns for that delay (a timer that hasn't fired). */
+        sleepGate: null,
         /** When set, uploads need this X-CSRF-Token header (else 403), and /csrf-token answers it. */
         csrfToken: null,
         /** Awaited before /csrf-token answers (a slow token fetch). */
@@ -143,6 +145,8 @@ function createHarness({ files = {}, storage = { [lease.STORAGE_KEYS.tabId]: 'pa
                 sleeps.push(ms);
                 clock += ms;
                 if (server.onSleep) server.onSleep(ms);
+                const gate = server.sleepGate && server.sleepGate(ms);
+                if (gate) await gate;
             },
             storage: pageStorage,
             log: (level, message, details) => logs.push({ level, message, details }),
