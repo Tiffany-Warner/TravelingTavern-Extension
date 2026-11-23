@@ -8,7 +8,7 @@ Requirements: `context/decisions/session-lease-spike.md` (cited as **R1–R44**)
 
 **Problem:** an ST page reads data once and later saves whole files from its own copy. A page left open on one device erases what another device saved since (chats, settings, lorebooks, personas, extension files).
 
-**Design: one active page per ST user.** A small lease file names the page that may write. Every other page is **parked**: it shows an overlay with **Use here**, and its requests to the server are held, never sent. Use here claims the lease and reloads the page, so it starts from fresh data. The lease needs no knowledge of which endpoints save what; the per-save guard it replaces did (why, and the evidence: `context/decisions/session-lease-spike.md`).
+**Design: one active page per ST user.** A small lease file names the page that may write. Every other page is **parked**: it shows an overlay with **Use here**, and its requests to the server are held, never sent. Use here claims the lease and reloads the page, so it starts from fresh data. **Never stuck:** every parked or waiting state offers a way back in, and going ahead at the user's own risk (Take over anyway, Turn off protection: E4) is always a tap after a warning. The lease needs no knowledge of which endpoints save what; the per-save guard it replaces did (why, and the evidence: `context/decisions/session-lease-spike.md`).
 
 **Scope:** every page that runs `session-lease.js`: desktop tabs with this extension installed, and the TravelingTavern app's page (bundled copy, app spec). Pages without it are not protected (E13).
 
@@ -27,12 +27,15 @@ Two small JSON files in the ST user's files. Each ST user has their own, so the 
 
 - Uncached every time: page `fetch(url, { cache: 'no-store' })`; Kotlin sends `Cache-Control: no-cache`
 - **404 = the file doesn't exist.** Any other non-2xx, a network error, a body that isn't a JSON object, or a missing or mistyped required field = **unreadable**. Unreadable is never "missing" and never "free": the page parks (R11)
+- **Bound: 10 s** (`LEASE_FETCH_TIMEOUT_MS`): every lease read (fetch and body) is aborted after 10 s and is unreadable ("can't reach"), so no state waits on a server that accepts the connection but never answers: the start decision, a claim, the wait for `busy`, Take over anyway, a holder's checks. The lease's own CSRF token fetch has the same bound
+- Unreadable has two park reasons, so the user reads the right text (E9): a network error, the 10 s bound, or a status other than 2xx / 404 parks as **`unreadable`** (can't reach ST); a 2xx answer that isn't valid JSON or has a wrong field parks as **`damaged`** (the file is damaged). Both decide the same way; only the text and the ways out (E9) differ
 - The lease is read through the original `fetch`, never through the wrapper (R1)
 
 ### Writing
 
 - `POST /api/files/upload` with the CSRF token the lease fetched itself (E6), body `{ "name": "<file name>", "data": "<base64 of the UTF-8 JSON>" }`. ST writes the file atomically (temp file + rename)
 - A write can fail transiently (Windows `EPERM` on the rename, answered as 500). Retry rules: E3
+- Every lease write is bounded like a read (10 s, then aborted). The release marker's `keepalive` upload (E5) is not: nothing waits for it. A write aborted at the bound may still land later: the next re-read finds it (an own pair is verified, not written again; a page that already gave up stays parked, E7)
 - Each file stays under 1 KB. No other files are written
 
 ### Lease fields
@@ -78,7 +81,7 @@ No lease file (404) = free: the page claims (E4). A missing marker with a lease 
 ### `format`
 
 - Every page knows a set of formats it can read, and writes only the newest format it knows
-- **A page that reads a format it doesn't know parks** (fail closed, R41): it doesn't claim, doesn't offer Use here, and never writes over the file. Its parked state names the outdated side, which is always its own copy: the extension on desktop (`source: 'extension'`), the app in the app's page (`source: 'app'`). See `leaseState` reason `unknownFormat` (E11)
+- **A page that reads a format it doesn't know parks** (fail closed, R41): it doesn't claim, doesn't offer Use here, and never writes over the file by itself. Only the user's **Take over anyway** after a warning writes over it (E4), in this copy's format; a newer reader that still knows that format then works, an older one meanwhile parks as before. Its parked state names the outdated side, which is always its own copy: the extension on desktop (`source: 'extension'`), the app in the app's page (`source: 'app'`). See `leaseState` reason `unknownFormat` (E11)
 - A missing `format` is an unknown format.
 - **`format` changes only for a change that would make an older reader decide wrongly** (a field whose meaning changes, a new field that a decision depends on). Additive fields that older readers can safely ignore don't bump it
 - Why so strict: the app's bundled copy lags the extension (app releases vs `git pull`), so the two regularly run different versions against one file; a bump locks the older side out until it updates
@@ -92,8 +95,8 @@ No decision uses a clock time from the files: devices' clocks differ. `claimedAt
 
 - **One write in flight at a time** (R24): claims, epoch bumps and `busy` / `active` updates go through one queue in the page. Otherwise an update that read the lease before an epoch bump can write the old epoch back
 - **Every update re-reads first** and writes only if the lease still holds this page's pair (E2). Pair changed → park (`lost`) at once; unknown format → park (`unknownFormat`) at once. An unreadable or missing (404) lease may be transient: it counts as a failed attempt (below)
-- **Bounded retry** (R7): a failed write (e.g. Windows `EPERM`, answered as 500) is retried after a random 100–200 ms, at most 3 attempts in total, re-reading before each; an unreadable or missing re-read counts as a failed attempt. If the last attempt's re-read was unreadable or missing, the page parks (`unreadable`, or `lost` for a missing lease), whatever the write type. When all 3 attempts fail at the write:
-    - **claim or epoch bump** → the page isn't holder: it parks (`unreadable`)
+- **Bounded retry** (R7): a failed write (e.g. Windows `EPERM`, answered as 500) is retried after a random 100–200 ms, at most 3 attempts in total, re-reading before each; an unreadable or missing re-read counts as a failed attempt. If the last attempt's re-read was unreadable or missing, the page parks (`unreadable` or `damaged`, or `lost` for a missing lease), whatever the write type. When all 3 attempts fail at the write:
+    - **claim (incl. Take over anyway) or epoch bump** → the page isn't holder: it parks (`error`: the reads worked, the writes didn't; E9 offers Refresh, Take over anyway and Turn off protection). A claim or bump whose last write got no answer (network error, the 10 s bound) parks as `unreadable` (can't reach) instead, and so does Take over anyway whose own first read couldn't reach ST
     - **`active`** → the page stays holder; logged (only reopening the chat after a takeover is affected)
     - **`busy: true`** → see below; a `busy: false` stays pending as for `busy: false` (the failed write may still have landed)
     - **`busy: false`** → the page stays holder and keeps the pending `busy: false`: it goes with the holder's next lease write or check until it lands, so the file never stays `busy: true` after a reply
@@ -106,7 +109,7 @@ No decision uses a clock time from the files: devices' clocks differ. `claimedAt
 **Claim** (Use here, an automatic claim at start, or the app's `useHere()` / `onForeground()`):
 
 1. Read the lease and the marker. Unknown format → park (`unknownFormat`) and stop
-2. **Wait for `busy`** (R6, R35) unless the lease is released (its `busy` is stale) or there is no lease: re-read once per second for at most 60 s while the lease is `busy`, reporting `waitingForReply`. A changed pair (another page claimed) parks this page (`lostRace`); a lease that becomes released ends the wait. The one named polling exception (`coding-standards.md`). A `busy` that can never clear (R19) is prevented by E8, not waited out
+2. **Wait for `busy`** (R6, R35) unless the lease is released (its `busy` is stale) or there is no lease: re-read once per second for at most 60 s while the lease is `busy`, reporting `waitingForReply`. A changed pair (another page claimed) parks this page (`lostRace`); a lease that becomes released ends the wait. After **10 s** of waiting, `leaseState.actions` offers **Take over anyway** (re-reported at the wait's next 1 s step); a tap ends the wait at the following step and continues as a forced claim (below). The one named polling exception (`coding-standards.md`). A `busy` that can never clear (R19) is prevented by E8, not waited out
 3. Write `{ format, holder: own id, epoch: lease.epoch + 1 (1 if no lease), claimedAt, busy: false, active: carried over }`
 4. **Grace:** wait 1 s, so a write the old holder already sent lands before this page loads
 5. **Verify:** re-read; continue only if the lease holds this page's pair, else park (`lostRace`). Two pages claiming at once end with exactly one holder: the last write wins, the other's verify fails
@@ -118,7 +121,25 @@ No decision uses a clock time from the files: devices' clocks differ. `claimedAt
 - **A duplicated tab** therefore takes over from the original without a click (intended); the original parks at its next write
 - On desktop, SillyTavern's first reads happen before the extension loads (E6), so the start bump's grace doesn't fully cover a save a duplicated tab's original still has in flight
 - No lease, or the lease is released → **automatic claim** (steps 1–6, no click), at most once per tab between successful loads (a `sessionStorage` mark prevents a reload loop), cleared when a load becomes holder or the automatic claim ends without a reload
-- Otherwise → parked (`held`). Lease or marker unreadable → parked (`unreadable`)
+- Otherwise → parked (`held`). Lease or marker unreadable → parked (`unreadable`, or `damaged` for a 2xx answer that isn't valid: E2)
+- **Prerendered page** (Chrome can load ST hidden while the address is typed, `document.prerendering`): the start decision **never runs** while hidden; requests wait for it (E6) and nothing is decided or written. On `prerenderingchange` the page **reloads** (E7's reload: held chat saves aborted, `reloadPending` fallback), and the fresh, shown load decides as usual. Not just starting on activation: a prerendered page's sessionStorage (its tab id) is swapped for the tab's at activation, and its ST data may predate the old page's last saves (a prerender of the address in the holder's own tab would bump and hold with that data). Costs one extra ST load, only when Chrome prerenders. Requests waiting for the start decision aren't in the held registry, so that reload can't abort a waiting chat save; ST doesn't save a chat while prerendered, and a page without user activation shows no "Leave site?". The app's WebView has no address bar and ST has no speculation rules, so it doesn't prerender
+
+**Take over anyway (forced claim)**, offered on `unreadable`, `damaged`, `error`, `unknownFormat`, and on `waitingForReply` after 10 s (E9). Always a user tap after the warning "Anything unsaved on your other device may be lost." (the overlay's own card on desktop; the app's own dialog), never by itself:
+
+1. Park `claiming` (requests held). During the wait for `busy`, the wait ends at its next step
+2. Read both files once, only to choose what to write: a readable lease of a known format gives `epoch + 1` and its `active`; anything else gives epoch 1 and `active: null`. Nothing has to match, no wait for `busy`
+3. A release marker that is damaged or in an unknown format is first replaced by one naming a fresh random holder (matches no lease), so other pages park as `held`, not `damaged` / `unknownFormat`. A marker that couldn't be fetched is left alone
+4. Write the lease over whatever the file holds: `{ format, holder: <this tab id>.<new random load id>, epoch, claimedAt, busy: false, active }`. A new holder id, so no stale marker or older pair can match, and every other page parks at its next check by the pair rule (`lost`). Write queue and retry as E3; all attempts failed → `error` (`unreadable` when step 2's reads couldn't reach ST)
+5. Grace, verify (`lostRace` if another write landed after it), reopen flag (`useHere`: reopen and reconnect), abort held chat saves, reload. The fresh load bumps from its own tab as usual. Protection stays on
+
+**Turn off protection** (this tab only), offered on `unreadable`, `damaged`, `error` and `unknownFormat` (E9), the last resort for a problem that comes back on every load (writes that keep failing, a lease bug). Always a user tap after the warning "This page can save over newer changes from your other devices.":
+
+1. Set `tt-lease-off` in this tab's `sessionStorage`, abort held chat saves, reload (E7). The flag is set before the reload, so if the user cancels it ("Leave site?" → Stay) the page parks `reloadPending` and its next load is already off: what the user confirmed. Held requests are dropped by the reload, never sent. **Never stands down in place:** the page that hit trouble may hold a stale copy, so it reloads from fresh server data before anything passes
+2. A load that finds the flag stands down for this load: no wrapper, no lease reads or writes, no claim, no release. `window.__ttLease` is still defined (a second copy stands down) and reports `leaseState` `state: 'off'` (E11); desktop shows the banner (E9). ST then works as if the extension weren't installed
+3. The flag survives refreshes of this tab, so the problem doesn't ask again on every load, until **Turn protection back on** (removes it and reloads; the fresh load decides as E4) or the tab is closed. Other tabs and devices stay protected. A duplicated tab copies `sessionStorage`, so it is off too (banner shown)
+4. Storage blocked: the off mark goes on `window.name` (prefix `tt-lease-off-once:`) for the next load only, which removes it and restores the name (ST doesn't use `window.name`: E15). The prefix counts **only** when that load can't write `sessionStorage` and is a reload (Navigation Timing `type: 'reload'`); otherwise it is removed and ignored, because another site can name a window it opens (`window.open(url, name)`) and must never turn protection off
+
+**Refresh**, offered on every error state (`unreadable`, `damaged`, `error`, `unknownFormat`, `reloadPending`): E7's reload (held chat saves aborted, so no "Leave site?"); the fresh load decides as E4
 
 **Reopen the chat** (R10, R30): after a reload that follows any claim (Use here, automatic or onForeground), once ST fires `APP_READY` and the page is holder, open the `active` the lease held when this load became holder, with ST's context functions (`SillyTavern.getContext()`, read fresh each time: it returns a snapshot), the same steps as ST's own "open recent chat":
 
@@ -156,7 +177,7 @@ Wraps `window.fetch`, `XMLHttpRequest.prototype.open` / `send` and `navigator.se
 
 | Page state | Server-data request |
 |---|---|
-| Before the start decision (R18) | Waits for it, then as below |
+| Before the start decision (R18), incl. a prerendered page (E4) | Waits for it, then as below |
 | Holder, non-`GET`, not allowlisted | Re-reads the lease first (pair check); sent only if still holder, else the page parks and holds it |
 | Holder, `GET` or allowlisted | Sent if the last lease read is at most 2 s old; otherwise re-read first, as above (R5, R21) |
 | Parked | **Held** (R2): never sent, never refused |
@@ -174,11 +195,11 @@ Wraps `window.fetch`, `XMLHttpRequest.prototype.open` / `send` and `navigator.se
 
 ## 7. Parking and Reloads
 
-- **A page becomes writable only through a fresh load that holds the lease** (R4): the start decision (E4) is the only place a page unparks. A page that lost the lease never re-claims by itself; it offers Use here, which claims and reloads
+- **A page becomes writable only through a fresh load that holds the lease** (R4): the start decision (E4) is the only place a page unparks. A page that lost the lease never re-claims by itself; it offers Use here, which claims and reloads. **Second exception, the user's:** a tab with protection off (E4) writes without the lease, but only from a fresh load after the user's tap and warning
 - **One exception: resume after a freeze** (E5): a page that released on `freeze` holds again without a fresh load when the lease still holds its exact pair (no other page claimed since, so its data is still the newest). It still bumps and verifies first; requests wait for that check
 - Parking is immediate: from that moment every new server-data request is held
 - **Before any reload, abort only held chat saves** (R3): held `/api/chats/save` and `/api/chats/group/save` are rejected with an `AbortError`, so ST's `isChatSaving` clears and its `beforeunload` doesn't block the reload with "Leave site?". These paths are a named constant (E15). **Then wait one task (`setTimeout(0)`) before reloading:** ST clears the flag in its save handlers, which run only after the rejection; reloading at once lets `beforeunload` cancel the reload
-- **A reload that didn't happen** (cancelled by `beforeunload` or the user): a page still alive **2.5 s** later parks as `reloadPending` (E9), never stays in `claiming`; its **Reload** button reloads from the click. No new claim: the fresh load decides (E4)
+- **A reload that didn't happen** (cancelled by `beforeunload` or the user): a page still alive **2.5 s** later parks as `reloadPending` (E9), never stays in `claiming`; its **Refresh** button reloads again (E9). No new claim: the fresh load decides (E4)
 - **Held reads are never aborted:** an extension that sees a failed read may write a default file (Memory Books does). They stay pending until the page unloads
 - No held request is ever sent, before or after a reload
 
@@ -203,30 +224,41 @@ Shown by `index.js` from `tt-lease` events of type `leaseState` (E11). **Overlay
 **Behavior**
 
 - A `<dialog>` opened with `showModal()`, covering the window, so it sits above ST's loader and popups and everything under it is inert. Whenever another dialog opens while parked (ST popups are modal), the overlay is closed and re-opened so it is the top modal again and **Use here** stays clickable. Escape can't close it
-- **Use here** calls `window.__ttLease.useHere()`
+- The buttons come from `leaseState.actions` (E11), in that order: **Use here**, **Refresh**, **Take over anyway**, **Turn off protection** call the `window.__ttLease` member of the same name (Refresh reloads directly if the lease doesn't offer it). A parked card whose `actions` has nothing known still shows Refresh, so no card is a dead end
+- **Warning step** before Take over anyway and Turn off protection: the card's content is replaced, in the overlay's own DOM (no `window.confirm`, no ST popup), by a title, the warning line, the action's button and **Cancel** (back to the card). A new `leaseState` replaces it
+- **Protection-off banner** (`state: 'off'`): a bar fixed under ST's top bar (`top: var(--topBarBlockSize)`, ST's own variable, E15; `z-index` below ST's top-bar drawers), centered at `--sheldWidth`, theme colors, accent border. Text: "Protection is off in this tab. If this keeps happening, please report it on GitHub with the steps that led to it, or uninstall the extension." ("GitHub" links to the repo's Issues page, new tab) and a **Turn protection back on** button. Stays visible while off; no overlay
 
 **Design**
 
 - A **centered card** (rounded, soft shadow, narrow, full width minus margins on small windows) on a **dimmed, blurred backdrop** (`::backdrop`, `backdrop-filter: blur(var(--SmartThemeBlurStrength))`)
-- Content, top to bottom: a clear **title**, **one line** of text, then a **large, full-width, rounded "Use here" button**
-- While claiming (`claiming`, `waitingForReply`): a **spinner** replaces the button. Under `prefers-reduced-motion: reduce`, and under ST's own **Reduced Motion** setting (ST's `reduced-motion` class on `body`), the spinner doesn't rotate (a static indicator instead) and the card's fade-in is off
+- Content, top to bottom: a clear **title**, **one line** of text, then the buttons: the first (primary) **large, full-width, rounded**, the others smaller and plainer below it (transparent, border in `--SmartThemeBorderColor`), stacked
+- While claiming (`claiming`, `waitingForReply`): a **spinner** instead of the primary button; any offered action (Take over anyway after 10 s) sits below it as a secondary button. Under `prefers-reduced-motion: reduce`, and under ST's own **Reduced Motion** setting (ST's `reduced-motion` class on `body`), the spinner doesn't rotate (a static indicator instead) and the card's fade-in is off
 - **Colors from ST's theme variables** (confirmed in ST 1.19.1 `public/style.css`), so it matches the user's theme: card background `--SmartThemeBlurTintColor`, text `--SmartThemeBodyColor`, border `--SmartThemeBorderColor`, shadow `--SmartThemeShadowColor`, spinner accent `--SmartThemeQuoteColor`, font size `--mainFontSize`, transitions `--animation-duration`
 - The button **builds on ST's `menu_button` class**, made full width and larger, with a **soft accent fill** (`--SmartThemeQuoteColor` mixed into `--SmartThemeBlurTintColor`), an accent border (`--SmartThemeQuoteColor`), text in `--SmartThemeBodyColor`, and a **stronger tint on hover and keyboard focus** that outranks ST's own `menu_button` focus fill
 - **Focus:** the card takes the focus when the overlay opens (and when it's re-raised), not the button, so the button shows its focus tint only once tabbed to (Chrome ignores `autofocus` on the dialog)
 - **Static markup built with DOM methods** (`createElement`, `textContent`); no HTML strings, no data in markup, no external fonts or assets. Styles in one `<style>` element the extension adds once, every rule scoped to the overlay's own class prefix
 - No other change to ST's look
 
-**Texts by `reason`**
+**Texts and buttons by `reason`** (buttons primary first, from `actionsFor`, E11)
 
-| `reason` | Title | Line | Control |
+| `reason` | Title | Line | Buttons |
 |---|---|---|---|
 | `held`, `lost` | In use on another device | Use SillyTavern here instead? | Use here |
 | `claiming` | Taking over… | Loading your chat on this device. If your browser asks whether to leave the site, choose Leave. | spinner |
-| `waitingForReply` | Finishing a reply… | Your other device is still writing a reply. | spinner |
+| `waitingForReply` | Finishing a reply… | Your other device is still writing a reply. After 10 s: "… If it has stopped responding, you can take over anyway." | spinner; after 10 s Take over anyway |
 | `lostRace` | Another device took over | It claimed SillyTavern first. | Use here |
-| `unreadable` | Can't reach SillyTavern | Nothing is saved from this page. | Use here |
-| `unknownFormat` | Update needed | Update the TravelingTavern extension to use SillyTavern here. | none |
-| `reloadPending` | Reload needed | Reload this page to finish taking over. | Reload (calls `location.reload()` from the click) |
+| `unreadable` | Can't reach SillyTavern | Nothing is saved from this page. Check that SillyTavern is running. | Use here, Refresh, Take over anyway, Turn off protection |
+| `damaged` | The lease file is damaged | TravelingTavern can't read its lease file. Nothing is saved from this page. | Take over anyway, Refresh, Turn off protection |
+| `error` | Something went wrong | TravelingTavern couldn't update its lease file. Nothing is saved from this page. | Refresh, Take over anyway, Turn off protection |
+| `unknownFormat` | Update needed | Update the TravelingTavern extension to use SillyTavern here. | Refresh, Take over anyway, Turn off protection |
+| `reloadPending` | Reload needed | Reload this page to finish taking over. | Refresh |
+
+**Warning texts**
+
+| Action | Title | Line | Confirm button |
+|---|---|---|---|
+| Take over anyway | Take over anyway? | Anything unsaved on your other device may be lost. | Take over anyway |
+| Turn off protection | Turn off protection in this tab? | This page can save over newer changes from your other devices. | Turn off protection |
 
 ## 10. Model Connection After a Takeover Reload
 
@@ -262,31 +294,36 @@ Everything the app and the extension rely on from each other. Changing any of it
 
 ### `window.__ttLease`
 
-Frozen, defined once, no off switch.
+Frozen, defined once, before the wrapper is installed (an install error can't leave held requests behind dead buttons). Only the user can turn protection off, in one tab (`turnOffProtection`).
 
 | Member | Meaning |
 |---|---|
 | `version` | `LEASE_VERSION`, an integer |
 | `source` | `'app'` or `'extension'`: which copy runs in this page |
 | `useHere()` | Use here: claims if parked and not already claiming (E4), then reloads. Returns a promise; outcome is reported through `leaseState` |
-| `onForeground()` | The app returned to the foreground. Holder: confirm the lease is still its own, bump the epoch if its release marker matches (A5), else park. Parked: claim **only if the lease is released** (R43), else stay parked. Always reports `leaseState`, even when unchanged (unless a claim's reload follows). Returns a promise |
+| `onForeground()` | The app returned to the foreground. Holder: confirm the lease is still its own, bump the epoch if its release marker matches (A5), else park. Parked: claim **only if the lease is released** (R43), else stay parked. Always reports `leaseState`, even when unchanged (unless a claim's reload follows; off: re-reports `state: 'off'`). Returns a promise |
+| `takeOverAnyway()` | Take over anyway (E4), only while `leaseState.actions` lists it. The caller has shown the warning. Returns a promise (`ignored` when not offered; `forcing` during the wait for `busy`, whose claim then reloads); the outcome is reported through `leaseState` |
+| `turnOffProtection()` | Turn off protection in this tab (E4), only while offered; the caller has shown the warning. Sets the flag and reloads. Returns `true` when it reloads, else `false` |
+| `turnProtectionOn()` | Only while off: removes the flag and reloads protected. Returns `true` when it reloads, else `false` |
+| `refresh()` | Refresh (E4, E7), only while offered: aborts held chat saves and reloads. Returns `true` when it reloads, else `false` |
 
-Nothing else is exposed. Neither hook takes arguments, and neither can make a parked page writable without a claim and a fresh load (R4).
+Nothing else is exposed. No member takes arguments, and none can make a parked page writable without a claim and a fresh load (R4); turning protection off also goes through a fresh load.
 
 ### Messages to the app
 
 Posted as JSON strings to the app's `TravelingTavern` listener, main frame only, in the app's envelope `{ "v": 1, "type": "...", ... }`. The app registers the listener for its saved server's origin only.
 
-**`leaseState`**: sent once the start decision is made, on every change (holder ↔ parked, a new reason, `epoch`, `busy`), and on every `onForeground()`, unchanged too (unless a claim's reload follows): the app's pre-check (A4) may have put up its own parked scrim and waits for the page to confirm.
+**`leaseState`**: sent once the start decision is made, on every change (holder ↔ parked, a new reason, `epoch`, `busy`, `actions`), and on every `onForeground()`, unchanged too (unless a claim's reload follows): the app's pre-check (A4) may have put up its own parked scrim and waits for the page to confirm. A load with protection off sends it once at install (`state: 'off'`).
 
 | Field | Type | Meaning |
 |---|---|---|
-| `state` | `"holder"` or `"parked"` | |
-| `reason` | string or `null` | `null` when holder. Parked: `"held"` (another page holds the lease), `"lost"` (this page lost it), `"claiming"`, `"waitingForReply"` (claiming, waiting for the other page's `busy` to clear: R29), `"lostRace"` (another page claimed first), `"unreadable"`, `"unknownFormat"` (a lease file in a newer format: this page's own copy is outdated, so in the app's page the app needs an update: E2), `"reloadPending"` (the reload after a claim didn't happen: E7) |
-| `pageId` | string | This load's `holder` id (`<tab id>.<load id>`) |
+| `state` | `"holder"`, `"parked"` or `"off"` | `"off"`: protection is off in this tab (E4); the other fields are `null` / `false`, `actions` is `["turnProtectionOn"]` |
+| `reason` | string or `null` | `null` when holder. Parked: `"held"` (another page holds the lease), `"lost"` (this page lost it), `"claiming"`, `"waitingForReply"` (claiming, waiting for the other page's `busy` to clear: R29), `"lostRace"` (another page claimed first), `"unreadable"` (a lease file couldn't be fetched: ST unreachable), `"damaged"` (a lease file answered 2xx but isn't valid: E2), `"error"` (lease writes kept failing while reads worked, or a lease-code error: E3), `"unknownFormat"` (a lease file in a newer format: this page's own copy is outdated, so in the app's page the app needs an update: E2), `"reloadPending"` (the reload after a claim didn't happen: E7) |
+| `pageId` | string or `null` | This load's `holder` id (`<tab id>.<load id>`); `null` when off |
 | `epoch` | integer or `null` | The epoch this page holds; `null` if it never held the lease in this load |
 | `busy` | boolean | This page is generating a reply or waiting for its chat save (E8), with `busy: true` in the lease |
 | `connected` | boolean | ST is connected to a model (`onlineStatus` isn't `no_connection`); the app shows its notice when a holder reports `false` after a takeover (E10, A7) |
+| `actions` | array of strings | The ways out offered now, primary first: `"useHere"`, `"refresh"`, `"takeOverAnyway"`, `"turnOffProtection"`, or `"turnProtectionOn"` when off. Each calls the `window.__ttLease` member of the same name. Per reason: E9's table; `[]` for a holder and while `claiming`; `waitingForReply` gets `["takeOverAnyway"]` after 10 s. Readers ignore values they don't know |
 | `origin` | string | `location.origin`, where Kotlin reads the lease files and sends its release |
 
 **`leaseInfo`**: once per page load after the start decision, and again whenever `tt-extension-ready` fires.
@@ -332,14 +369,14 @@ The page never sends ST's CSRF token in a message. For the background release, K
 
 ### Names
 
-`window.__ttLease`, `window.__ttLeaseSource`, `window.__ttExtension`, `tt-extension-ready`, `tt-lease` (and its `type` field), `leaseState`, `leaseInfo`, `leaseNotice`, `LEASE_VERSION`, `TESTED_ST_VERSIONS`, `session-lease.js`, `tt-session-lease.json`, `tt-session-release.json`, the `TravelingTavern-Extension` folder, the app's `TravelingTavern` listener.
+`window.__ttLease` (incl. `takeOverAnyway`, `turnOffProtection`, `turnProtectionOn`, `refresh`), `window.__ttLeaseSource`, `window.__ttExtension`, `tt-extension-ready`, `tt-lease` (and its `type` field), `leaseState`, `leaseInfo`, `leaseNotice`, `LEASE_VERSION`, `TESTED_ST_VERSIONS`, `session-lease.js`, `tt-session-lease.json`, `tt-session-release.json`, the `TravelingTavern-Extension` folder, the app's `TravelingTavern` listener.
 
 The app's own `window.__ttBridge` is not part of this contract.
 
 ### What the contract never does
 
 - Pass ST data, the CSRF token or anything from chats, cards, lorebooks or settings to the app. Messages carry only the fields above
-- Offer a way to turn the lease off, skip the wrapper, or make a parked page writable without a claim and a fresh load (the one internal exception is resume after a freeze, E7)
+- Turn the lease off, skip the wrapper, or make a parked page writable without a claim and a fresh load, except by the user's tap after a warning (Take over anyway: a claim and a reload; Turn off protection: this tab only, after a reload). The one internal exception is resume after a freeze (E7)
 - Log content: logs carry the kind of event, the reason, endpoint paths and counts only
 
 ## 12. Version Check
@@ -371,26 +408,36 @@ The app's own `window.__ttBridge` is not part of this contract.
 | ST's Custom (OpenAI-compatible) chat completion source bypasses its status check (`onlineStatus` "Status check bypassed") | Counts as connected with the model down: no `notConnected` notice; the first reply fails in ST as usual | — (ST's own behavior) |
 | ST doesn't save after every reply end (a failed or errored generation, a quiet generation; on a hidden page its save wait can time out and skip the save: E15), and a save can take longer than 3 s (slow extension handlers on `MESSAGE_RECEIVED`, a hidden page's slowed timers) | Up to 3 s of needless waiting when no save comes; a save later than 3 s can still lose the reply (never data); a skipped save leaves it unsaved whatever the lease does | Server plugin, or a longer bound if seen |
 | A failed `busy: false` on a holder that then goes idle (no further lease write or check to carry it) | One claimer can wait the full 60 s cap | Server plugin, or the holder retrying on its next activity (already the rule, E3) |
+| A damaged lease or release marker (a truncated write, a hand edit, a disk problem) | Every page parks (`damaged`); Use here can't build on it | **Take over anyway** (E4) writes a fresh claim (and a fresh marker if that one is damaged) |
+| Take over anyway while the other device is still writing (a reply, a save in flight, or a holder that isn't really stuck) | That device's unsaved work is lost: its reply's save and later writes are held once it parks; a write already in flight may still land within the grace | — (the user's choice after the warning) |
+| Take over anyway over an unknown (newer) `format` | The file is rewritten in this copy's format. Pages of the newer copy read it if they still know that format; the older copy keeps working until it updates | Update the outdated side (E2) |
+| A tab with protection off (E4) | It writes like a page without the lease: it can save over newer changes from other devices, and no other page knows it is writing (it holds no lease and parks nobody). The banner stays visible and asks for a report | — (the user's last resort after the warning); a server plugin could refuse its writes |
+| A duplicated tab copies `sessionStorage`, so a duplicate of a tab with protection off is off too | Two unprotected tabs; both show the banner | — (Turn protection back on in each) |
+| A server that accepts the connection but never answers | Each lease read or write waits up to 10 s, then counts as "can't reach" (`unreadable`, with its ways out, E2). A claim whose three writes all hang can take about 30 s to show them; a write aborted at the bound can still land later (found by the next re-read) | — (the bound, E2) |
 
 ## 14. Tests
 
 **Unit** (`node --test`, no dependencies, fake `fetch`, one file per topic under `test/`). The lease's decisions are pure functions inside `createSessionLease({ fetch, post, now, sleep, storage, log })`; the browser wrapper stays thin.
 
-- `files`: reading both files (E2): 404 vs unreadable, malformed JSON, missing and unknown fields, unknown or missing `format`, released only on an exact pair match
+- `files`: reading both files (E2): 404 vs unreadable vs damaged, malformed JSON, missing and unknown fields, unknown or missing `format`, released only on an exact pair match
 - `pair-rule`: every decision compares (`holder`, `epoch`), never the epoch alone (E2)
 - `writes`: one write in flight, re-read first, 3 attempts 100–200 ms apart, unchanged writes skipped, outcomes per write type after all retries (E3)
 - `claim`: busy wait (60 s cap, skipped when released, changed pair → `lostRace`), claim write, grace, verify, lost race, reopen flag (E4)
 - `start-decision`: own tab → epoch bump with `busy: false`; free or released → automatic claim, once per tab; otherwise parked; refresh and duplicated tab (E4)
 - `release`: marker on `pagehide` and `freeze`, back/forward cache, the check on `resume` after a `freeze` (E5)
+- `actions`: `actionsFor` for every reason (primary first, every error state has Refresh), Take over anyway on `waitingForReply` from 10 s and the `leaseState` re-posted once then, nothing for a holder or a released page (E9, E11)
+- `force-claim`: Take over anyway on a damaged lease, an unknown format, a busy lease (offered at 10 s, ends the wait), a new holder id of this tab, marker repair, the old holder parking by the pair rule, verify and a lost race after it, writes that keep failing (`error`), an unreachable server (`unreadable`), not offered → ignored (E4)
+- `off-mode`: Turn off protection only when offered, the per-tab flag (survives a refresh, cleared by Turn protection back on), the one-load `window.name` fallback (only on a reload without working storage; another site's window name ignored), the stood-down page (no wrapper, no lease I/O, `state: 'off'`), `refresh()` (E4, E11)
 - `wrapper`: what counts as server data, holder vs parked, 2 s read window, allowlist on and off, held requests never settle, only chat saves aborted, `sendBeacon` refused while parked, requests wait for the start decision (E6, E7)
 - `reload`: held chat saves aborted and ST's handlers run before the reload; a reload that doesn't happen ends in `reloadPending` (E7)
 - `busy`: generation requests sent only after `busy: true` is confirmed, `AbortError` and `replyNotStarted` when it can't be written, cleared only when the response is over and then a chat save started after that end has completed (any status) or at the 3 s bound, a new reply during the wait, parked during the wait, overlapping generations, the headers fallback, writes behind the page's own bump (E8)
 - `claim` also: a claimer waiting on `busy` claims only after the holder's chat save (E8)
-- `csrf`: the lease's own CSRF token, fetched again once on 403; ST's `/csrf-token` ordered after it (E6)
+- `csrf`: the lease's own CSRF token, fetched again once on 403, a hung token fetch ended at the 10 s bound; ST's `/csrf-token` ordered after it (E6)
+- `timeout`: the 10 s lease I/O bound: a hung read at start (`unreadable`, ways out), a hung write in a claim (`unreadable`, not `error`), a write that lands after its timeout (found by the re-read; after the page gave up it stays parked), a hung read in the wait for `busy`, Take over anyway with ST not answering (E2, E3)
 - `foreground`: `onForeground` for a holder (bump that invalidates its own marker) and a parked page (claims only a released or missing lease); always one `leaseState`, unchanged too (E11, app A5)
-- `instance`: one instance per page, main frame only, never on the login page, frozen `window.__ttLease`, desktop-only release wiring, `index.js` versions match (E11)
+- `instance`: one instance per page, main frame only, never on the login page, frozen `window.__ttLease` with the contract's members, defined before the wrapper (an install error leaves working buttons), desktop-only release wiring, a prerendered page never decides and reloads when shown, `index.js` versions match (E4, E11)
 - `messages`: `leaseState`, `leaseInfo` and `leaseNotice` payloads, to the app and as `tt-lease` with `type`; no CSRF token or ST data (E11)
-- `overlay`: what `index.js` shows for each report: overlay texts, toasts (E9, E10, E12)
+- `overlay`: what `index.js` shows for each report: overlay texts and buttons per reason (from `actions`), damaged vs unreachable, the 10 s line, the warning step, the banner, toasts (E9, E10, E12)
 - `reopen`: the reopen flag, character reopen and its guards, group and deleted character → start screen, recording `active` (incl. behind the page's own bump) (E4)
 - `connect`: connect press only after Use here / onForeground and only while not connected or connecting, button by `main_api`, `notConnected` after the 10 s wait, `connected` tracking, hooks on desktop and at document start, incl. a context that throws on `load` and works one task later (E10)
 - `setup`: `manifest.json` points at `index.js`
@@ -414,6 +461,11 @@ The app's own `window.__ttBridge` is not part of this contract.
 - [ ] Lease write `EPERM` (Windows): retried, no false park
 - [ ] Unknown `format` in the lease file: page parks with the update message, writes nothing
 - [ ] Untested ST version: toast once, every request checked
+- [ ] Damaged lease file: "The lease file is damaged"; Take over anyway (warning, Cancel, confirm) → holder, the other tab parks. Unknown format: Refresh, then Take over anyway → format 1, marker repaired, other tabs park as held. Writes that keep failing (lease file locked): "Something went wrong"; Refresh after the lock is gone parks normally
+- [ ] Take over anyway during a reply: offered at 10 s, the claim lands right after the tap; the other device's reply is lost (its save held)
+- [ ] Turn off protection: warning, banner, requests go through unwrapped, the lease files untouched; Refresh → still off; other tabs protected; Turn protection back on → protected, parks or claims normally
+- [ ] Server unreachable: "Can't reach SillyTavern" (not the damaged text); Take over anyway while down stays `unreadable`. Server paused (accepts, never answers): "Can't reach SillyTavern" after about 10 s
+- [ ] Prerender: after a release, a typed address that Chrome prerendered (`activationStart` above 0) reloads when shown and becomes holder with no click
 - [ ] Model connection restored after a Use here reload; not pressed after an automatic claim at start. A backend that can't connect (not the Custom source, which bypasses its check): one `notConnected` toast within about 10 s
 - [ ] The app's checks: app spec checklist
 

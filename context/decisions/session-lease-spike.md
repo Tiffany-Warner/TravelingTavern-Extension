@@ -30,7 +30,7 @@ The lease protects every data type tested, between desktop tabs and the app, inc
 1. **The wrapper exempts nothing.** Lease reads and writes use the original `fetch`; no request is let through by URL while parked
 2. **Parked = hold.** Server-data requests (`/api/…`, `/user/…`, any non-GET) are held, never refused; static files load
 3. **Before a reload, abort only held chat saves** (so `isChatSaving` clears and `beforeunload` doesn't block). Leave held reads pending, so no extension sees a failed read and writes a default file. No held request is ever sent
-4. **A page becomes writable only through a fresh load that holds the lease.** A page that lost the lease never re-claims by itself
+4. **A page becomes writable only through a fresh load that holds the lease.** A page that lost the lease never re-claims by itself. (Later, rc.5: a tab whose user turned protection off after a warning writes without the lease, from a fresh load: spec E4)
 5. **Re-read the lease before every write.** Reads may trust a read up to 2 s old (see 21 for read-only endpoints)
 6. **Claim:** wait for `busy` to clear (with timeout), write `epoch + 1`, wait the grace period (1 s), re-read, require holder **and** epoch to be ours, reload
 7. **Lease writes retry on failure:** re-read; if holder and epoch are still ours, stay holder and retry a bounded number of times, ~100–200 ms apart; park only if the claim changed or the lease can't be read. Write the lease less often (skip an unchanged `active`). A failed `busy: true` write is not metadata: don't start the generation, or tell the user

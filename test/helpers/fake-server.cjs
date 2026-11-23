@@ -55,7 +55,16 @@ function createHarness({ files = {}, storage = { [lease.STORAGE_KEYS.tabId]: 'pa
         leaseReads: 0,
         /** When set, answers ST's own requests: (url, init) => Response (e.g. a streamed reply). */
         stResponder: null,
+        /** Number of upcoming lease-file reads that never answer (until their signal aborts). */
+        hangLeaseReads: 0,
+        /** Number of upcoming uploads that never answer (until their signal aborts). */
+        hangUploads: 0,
+        /** A hung upload is still written when it is aborted (it reached ST; only the answer was lost). */
+        landHungUploads: false,
     };
+    /** The pages' lease I/O timers (fake: they fire only through fireTimeouts). */
+    const timers = new Map();
+    let nextTimer = 1;
     const uploads = [];
     const sleeps = [];
     const logs = [];
@@ -66,6 +75,18 @@ function createHarness({ files = {}, storage = { [lease.STORAGE_KEYS.tabId]: 'pa
     async function fakeFetch(url, init = {}) {
         if (server.offline) throw new TypeError('Failed to fetch');
         const method = String(init.method || 'GET').toUpperCase();
+        if (method === 'GET' && url === lease.USER_FILES_PATH + lease.LEASE_FILE && server.hangLeaseReads > 0) {
+            server.hangLeaseReads--;
+            server.leaseReads++;
+            return hang(init.signal, null);
+        }
+        if (method === 'POST' && url === lease.UPLOAD_PATH && server.hangUploads > 0) {
+            server.hangUploads--;
+            const { name, data } = JSON.parse(init.body);
+            const text = Buffer.from(data, 'base64').toString('utf8');
+            uploads.push({ name, value: JSON.parse(text), keepalive: init.keepalive === true, hung: true });
+            return hang(init.signal, () => { if (server.landHungUploads) server.files.set(name, text); });
+        }
         if (method === 'GET' && url.startsWith(lease.USER_FILES_PATH)) return answerRead(url.slice(lease.USER_FILES_PATH.length));
         if (method === 'POST' && url === lease.UPLOAD_PATH) {
             if (server.csrfToken !== null && new Headers(init.headers).get('X-CSRF-Token') !== server.csrfToken) {
@@ -83,6 +104,17 @@ function createHarness({ files = {}, storage = { [lease.STORAGE_KEYS.tabId]: 'pa
         server.stRequests.push({ url: String(url), method, headers: new Headers(init.headers), leaseAtSend: leaseText ? JSON.parse(leaseText) : null });
         if (server.stResponder) return server.stResponder(String(url), init);
         return Response.json({ ok: true });
+    }
+
+    /** A request that never answers; its signal aborting rejects it (after `onAbort`). */
+    function hang(signal, onAbort) {
+        return new Promise((resolve, reject) => {
+            if (!signal) return;
+            signal.addEventListener('abort', () => {
+                if (onAbort) onAbort();
+                reject(new DOMException('aborted', 'AbortError'));
+            }, { once: true });
+        });
     }
 
     function answerRead(name) {
@@ -150,6 +182,8 @@ function createHarness({ files = {}, storage = { [lease.STORAGE_KEYS.tabId]: 'pa
             },
             storage: pageStorage,
             log: (level, message, details) => logs.push({ level, message, details }),
+            setTimeout: (fn, ms) => { const id = nextTimer++; timers.set(id, { fn, ms }); return id; },
+            clearTimeout: (id) => { timers.delete(id); },
         });
         return { lease: instance, posts, storage: pageStorage };
     }
@@ -170,6 +204,14 @@ function createHarness({ files = {}, storage = { [lease.STORAGE_KEYS.tabId]: 'pa
         sleeps,
         logs,
         maxInFlight: () => maxInFlight,
+        /** Fires the pending lease I/O timeouts (as if 10 s passed); returns how many fired. */
+        fireTimeouts: () => {
+            const due = Array.from(timers.entries()).filter(([, t]) => t.ms === lease.LEASE_FETCH_TIMEOUT_MS);
+            for (const [id, t] of due) { timers.delete(id); t.fn(); }
+            return due.length;
+        },
+        /** Lease I/O timeouts waiting to fire. */
+        pendingTimeouts: () => Array.from(timers.values()).filter((t) => t.ms === lease.LEASE_FETCH_TIMEOUT_MS).length,
         /** Lease writes only (not the release marker). */
         leaseUploads: () => uploads.filter((u) => u.name === lease.LEASE_FILE),
         /** The lease file as stored, parsed. */

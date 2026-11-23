@@ -47,7 +47,7 @@ test('lease held from this tab (refresh): bumps to this load with busy false, ve
     assert.deepStrictEqual([h.leaseFile().holder, h.leaseFile().epoch, h.leaseFile().busy], [me, 4, false]);
     assert.deepStrictEqual(h.sleeps, [GRACE_MS]);
     assert.strictEqual(h.storage.map.has(KEYS.autoClaimed), false, 'a successful load clears the automatic-claim mark');
-    assert.deepStrictEqual(h.posts, [{ type: 'leaseState', state: 'holder', reason: null, pageId: me, epoch: 4, busy: false, connected: false }]);
+    assert.deepStrictEqual(h.posts, [{ type: 'leaseState', state: 'holder', reason: null, pageId: me, epoch: 4, busy: false, connected: false, actions: [] }]);
 });
 
 test('a previous load of this tab with a full holder id: the tab part decides', async () => {
@@ -105,7 +105,7 @@ test('another holder, not released: parked (held), nothing written', async () =>
     const h = createHarness({ files: { [LEASE]: leaseFile({ holder: 'page-b' }) } });
     assert.deepStrictEqual(await h.lease.start(), { status: 'parked', reason: 'held' });
     assert.strictEqual(h.uploads.length, 0);
-    assert.deepStrictEqual(h.posts, [{ type: 'leaseState', state: 'parked', reason: 'held', pageId: h.lease.pageId(), epoch: null, busy: false, connected: false }]);
+    assert.deepStrictEqual(h.posts, [{ type: 'leaseState', state: 'parked', reason: 'held', pageId: h.lease.pageId(), epoch: null, busy: false, connected: false, actions: ['useHere'] }]);
 });
 
 test('a stale marker (older claim) does not free the lease', async () => {
@@ -113,10 +113,25 @@ test('a stale marker (older claim) does not free the lease', async () => {
     assert.deepStrictEqual(await h.lease.start(), { status: 'parked', reason: 'held' });
 });
 
-test('unreadable lease, or unreadable marker with another holder: parked (unreadable), nothing written', async () => {
+test('damaged lease, or damaged marker with another holder: parked (damaged), nothing written', async () => {
     let h = createHarness({ files: { [LEASE]: 'not json' } });
-    assert.deepStrictEqual(await h.lease.start(), { status: 'parked', reason: 'unreadable' });
+    assert.deepStrictEqual(await h.lease.start(), { status: 'parked', reason: 'damaged' });
+    h = createHarness({ files: { [LEASE]: leaseFile({ holder: 'page-b', busy: 'yes' }) } });
+    assert.deepStrictEqual(await h.lease.start(), { status: 'parked', reason: 'damaged' }, 'a wrong field is damaged too');
     h = createHarness({ files: { [LEASE]: leaseFile({ holder: 'page-b' }), [MARKER]: '{' } });
+    assert.deepStrictEqual(await h.lease.start(), { status: 'parked', reason: 'damaged' });
+    assert.strictEqual(h.uploads.length, 0);
+});
+
+test('lease or marker that cannot be fetched (status, network): parked (unreadable), not damaged', async () => {
+    let h = createHarness({ files: { [LEASE]: leaseFile({ holder: 'page-b' }) } });
+    h.server.readStatus.set(LEASE, 500);
+    assert.deepStrictEqual(await h.lease.start(), { status: 'parked', reason: 'unreadable' });
+    h = createHarness({ files: { [LEASE]: leaseFile({ holder: 'page-b' }) } });
+    h.server.readStatus.set(MARKER, 403);
+    assert.deepStrictEqual(await h.lease.start(), { status: 'parked', reason: 'unreadable' });
+    h = createHarness();
+    h.server.offline = true;
     assert.deepStrictEqual(await h.lease.start(), { status: 'parked', reason: 'unreadable' });
     assert.strictEqual(h.uploads.length, 0);
 });
@@ -154,7 +169,7 @@ test('an automatic claim that ends without a reload clears the mark; a later loa
 test('an automatic claim that fails every write clears the mark', async () => {
     const h = createHarness();
     h.server.failUploads = 10;
-    assert.deepStrictEqual(await h.lease.start(), { status: 'parked', reason: 'unreadable' });
+    assert.deepStrictEqual(await h.lease.start(), { status: 'parked', reason: 'error' });
     assert.strictEqual(h.storage.map.has(KEYS.autoClaimed), false);
 });
 
@@ -196,10 +211,10 @@ test('start runs once per load', async () => {
     assert.strictEqual(h.leaseFile().epoch, 4);
 });
 
-test('a failed epoch bump at start parks (unreadable)', async () => {
+test('a failed epoch bump at start parks (error)', async () => {
     const h = createHarness({ files: { [LEASE]: leaseFile({ holder: 'page-a', epoch: 3 }) } });
     h.server.failUploads = 10;
-    assert.deepStrictEqual(await h.lease.start(), { status: 'parked', reason: 'unreadable' });
+    assert.deepStrictEqual(await h.lease.start(), { status: 'parked', reason: 'error' });
 });
 
 test('decideStart: pure decisions', () => {

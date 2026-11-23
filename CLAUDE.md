@@ -37,14 +37,15 @@ No build step. To try a change, install the branch on the **test install** and h
 ## Hard Rules
 
 - **Never delete or overwrite SillyTavern data unless the user confirmed it in a dialog.** Saving an older copy over newer data counts as deleting. No change may weaken this
-- **Fail closed.** A lease or marker that can't be read or understood (incl. an unknown `format`) parks the page; a request the lease can't decide about is held
+- **Fail closed.** A lease or marker that can't be read or understood (incl. an unknown `format`) parks the page; a request the lease can't decide about is held. Only the user's tap after a warning goes past it (Take over anyway, Turn off protection: spec E4)
+- **Never stuck.** Every parked or waiting state offers a way back in; going ahead at your own risk is always a user tap after a warning. Nothing stands down or force-claims by itself
 - **Held, never refused; no exemptions.** A parked page holds every server-data request (`sendBeacon`, which can't wait, is refused while parked: spec E6); nothing passes the wrapper by URL. The lease's own I/O uses the original `fetch`
 - **The lease adds nothing to SillyTavern's data:** it writes only `tt-session-lease.json` and `tt-session-release.json`
 - **The lease never requires the app or the extension;** `session-lease.js` works however it was loaded
-- **Nothing can turn the lease off:** `window.__ttLease` is frozen, with no off switch
+- **Nothing turns the lease off but the user:** `window.__ttLease` is frozen; only the user can turn protection off, in one tab, after a warning, and that tab reloads from fresh data before anything passes (spec E4)
 - **Don't change SillyTavern's look or behavior** beyond parking, the overlay and the spec's toasts; never modify its code
 - **Keep the repo and folder name `TravelingTavern-Extension`:** SillyTavern installs into it and the app's install calls use it
-- **Keep the names the app depends on** (spec E11): `window.__ttLease` (`version`, `source`, `useHere`, `onForeground`), `window.__ttLeaseSource`, `window.__ttExtension` (`version`, `leaseVersion`), the `tt-extension-ready` and `tt-lease` events (incl. `type`), the `leaseState`, `leaseInfo` and `leaseNotice` messages and fields, and both lease files and fields. Ask before changing one, and bump `LEASE_VERSION`
+- **Keep the names the app depends on** (spec E11): `window.__ttLease` (`version`, `source`, `useHere`, `onForeground`, `takeOverAnyway`, `turnOffProtection`, `turnProtectionOn`, `refresh`), `window.__ttLeaseSource`, `window.__ttExtension` (`version`, `leaseVersion`), the `tt-extension-ready` and `tt-lease` events (incl. `type`), the `leaseState` (incl. `actions`), `leaseInfo` and `leaseNotice` messages and fields, and both lease files and fields. Ask before changing one, and bump `LEASE_VERSION`
 - **Every endpoint list is in the spec** (allowlist, chat saves, generation, connect buttons). On a new SillyTavern version, re-check them in its source (findings: `context/specs/ext-0.2-st-source-notes.md`) and run the checklist before widening `TESTED_ST_VERSIONS`
 - **Never test against real data.** Every manual test, spike and cleanup runs on the separate **test install** (own folder, data and port), never the **real server**; no unreleased lease code ever goes on the real server, not even for a quick check. Throwaway characters aren't enough: user files and extension data are shared by the whole install (the spike's cleanup overwrote real Memory Books files this way)
 - **The repo is public:** nothing private anywhere (`ai-guidelines.md` → Private Data)

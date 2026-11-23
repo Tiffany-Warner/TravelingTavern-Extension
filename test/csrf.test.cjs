@@ -5,7 +5,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
-const { createCsrfClient, CSRF_ORDER_MAX_WAIT_MS } = require('../session-lease.js');
+const { createCsrfClient, CSRF_ORDER_MAX_WAIT_MS, LEASE_FETCH_TIMEOUT_MS } = require('../session-lease.js');
 const { leaseFile, LEASE } = require('./helpers/fake-server.cjs');
 const { createFakeWindow, flush, track } = require('./helpers/fake-window.cjs');
 
@@ -61,11 +61,33 @@ test('ST’s /csrf-token is released after at most 2 s even if the lease’s fet
     const waited = track(client.afterOwnToken());
     await flush(5);
     assert.strictEqual(waited.settled(), false);
-    assert.deepStrictEqual(timers.map((t) => t.ms), [CSRF_ORDER_MAX_WAIT_MS]);
-    timers[0].fn();
+    assert.deepStrictEqual(timers.map((t) => t.ms).sort((a, b) => a - b), [CSRF_ORDER_MAX_WAIT_MS, LEASE_FETCH_TIMEOUT_MS]);
+    timers.find((t) => t.ms === CSRF_ORDER_MAX_WAIT_MS).fn();
     await flush(5);
     assert.strictEqual(waited.settled(), true);
     assert.deepStrictEqual(fetches, ['/csrf-token']);
+});
+
+test('a hung token fetch ends at the lease I/O bound (10 s), so lease writes don’t wait for it forever', async () => {
+    const timers = [];
+    const sent = [];
+    const client = createCsrfClient({
+        fetch: (url, init = {}) => {
+            if (url === '/csrf-token') return new Promise(() => {});
+            sent.push(new Headers(init.headers).get('X-CSRF-Token'));
+            return Promise.resolve(new Response('ok', { status: 200 }));
+        },
+        setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+        clearTimeout: () => {},
+        log: () => {},
+    });
+    const write = track(client.leaseFetch('/api/files/upload', { method: 'POST' }));
+    await flush(5);
+    assert.strictEqual(write.settled(), false, 'waits for the token fetch');
+    timers.find((t) => t.ms === LEASE_FETCH_TIMEOUT_MS).fn();
+    await flush(5);
+    assert.strictEqual(write.settled(), true);
+    assert.deepStrictEqual(sent, [null], 'sent without a token (ST refuses it: fail closed)');
 });
 
 test('a failed token fetch releases ST’s request at once and lease writes go out without a token (refused: fail closed)', async () => {

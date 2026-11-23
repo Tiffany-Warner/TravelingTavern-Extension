@@ -30,6 +30,8 @@
         bump: 'bump',
         busy: 'busy',
         active: 'active',
+        /** Take over anyway: a claim written over whatever the file holds (spec E4). */
+        force: 'force',
     });
 
     /** Why a page is parked (spec E11 `leaseState.reason`). */
@@ -39,9 +41,38 @@
         claiming: 'claiming',
         waitingForReply: 'waitingForReply',
         lostRace: 'lostRace',
+        /** A lease file couldn't be fetched: network error or a status other than 2xx / 404. */
         unreadable: 'unreadable',
+        /** A lease file answered 2xx but isn't valid JSON or has a wrong field. */
+        damaged: 'damaged',
+        /** Lease writes kept failing while reads worked, or a lease-code error. */
+        error: 'error',
         unknownFormat: 'unknownFormat',
         reloadPending: 'reloadPending',
+    });
+
+    /** The ways out a parked page offers (spec E9, E11 `leaseState.actions`). */
+    const ACTION = Object.freeze({
+        useHere: 'useHere',
+        refresh: 'refresh',
+        takeOverAnyway: 'takeOverAnyway',
+        turnOffProtection: 'turnOffProtection',
+        turnProtectionOn: 'turnProtectionOn',
+    });
+
+    /**
+     * `leaseState.actions` by reason, in display order with the primary first (spec E9, E11). Every
+     * error state offers a way back in (Refresh) and a way to go ahead at the user's own risk.
+     */
+    const ACTIONS_BY_REASON = Object.freeze({
+        held: Object.freeze([ACTION.useHere]),
+        lost: Object.freeze([ACTION.useHere]),
+        lostRace: Object.freeze([ACTION.useHere]),
+        unreadable: Object.freeze([ACTION.useHere, ACTION.refresh, ACTION.takeOverAnyway, ACTION.turnOffProtection]),
+        damaged: Object.freeze([ACTION.takeOverAnyway, ACTION.refresh, ACTION.turnOffProtection]),
+        error: Object.freeze([ACTION.refresh, ACTION.takeOverAnyway, ACTION.turnOffProtection]),
+        unknownFormat: Object.freeze([ACTION.refresh, ACTION.takeOverAnyway, ACTION.turnOffProtection]),
+        reloadPending: Object.freeze([ACTION.refresh]),
     });
 
     /** Page phases. A page leaves `deciding` once; it becomes holder only through the start decision. */
@@ -55,6 +86,8 @@
     /** The claim's wait for `busy`: re-read once per second for at most 60 s (spec E4, the one polling exception). */
     const BUSY_WAIT_INTERVAL_MS = 1000;
     const BUSY_WAIT_MAX_MS = 60000;
+    /** "Take over anyway" is offered once the claim has waited this long for `busy` (spec E4, E9). */
+    const FORCE_OFFER_AFTER_MS = 10000;
     /** After the last reply ends, `busy` waits at most this long for ST's chat save (spec E8). */
     const SAVE_WAIT_MAX_MS = 3000;
 
@@ -62,6 +95,11 @@
     const READ_WINDOW_MS = 2000;
     /** ST's own `/csrf-token` waits at most this long for the lease's token fetch (spec E6). */
     const CSRF_ORDER_MAX_WAIT_MS = 2000;
+    /**
+     * Every lease read and write (its own fetch, body included) is aborted after this long and counts as
+     * "can't reach ST" (spec E2, E3), so no state waits on a server that never answers.
+     */
+    const LEASE_FETCH_TIMEOUT_MS = 10000;
     /** A page still alive this long after its reload was asked for parks as `reloadPending` (spec E7). */
     const RELOAD_FALLBACK_MS = 2500;
 
@@ -139,7 +177,15 @@
         autoClaimed: 'tt-lease-auto-claimed',
         /** Set before a claim's reload: the CLAIM_KIND, read after the reload to reopen the chat. */
         reopen: 'tt-lease-reopen',
+        /** Protection is off in this tab (spec E4 → Turn off protection); removed by Turn protection back on. */
+        off: 'tt-lease-off',
     });
+
+    /**
+     * Prefix put on `window.name` when sessionStorage is blocked: protection is off for the next load
+     * only. That load removes it and restores the name. ST doesn't use `window.name` (spec E15).
+     */
+    const OFF_ONCE_NAME_PREFIX = 'tt-lease-off-once:';
 
     // ---- Pure decisions ----------------------------------------------------------------------
 
@@ -322,7 +368,30 @@
         if (read.kind === 'ok') return null;
         if (read.kind === 'unknownFormat') return { action: 'park', reason: PARK_REASON.unknownFormat };
         if (read.kind === 'missing') return { action: 'retry', reason: PARK_REASON.lost };
-        return { action: 'retry', reason: PARK_REASON.unreadable };
+        return { action: 'retry', reason: unreadableReason(read) };
+    }
+
+    /**
+     * The park reason for an unreadable read (spec E9): `damaged` when ST answered 2xx with a file that
+     * isn't valid, `unreadable` when the file couldn't be fetched.
+     * @param {{ damaged?: boolean }} read An unreadable read.
+     * @returns {string} PARK_REASON.damaged or PARK_REASON.unreadable.
+     */
+    function unreadableReason(read) {
+        return read.damaged === true ? PARK_REASON.damaged : PARK_REASON.unreadable;
+    }
+
+    /**
+     * The ways out a page offers now (`leaseState.actions`, spec E9, E11), primary first.
+     * @param {string|null} reason The park reason; null for a holder.
+     * @param {number} waitedMs How long the claim has waited for `busy` (`waitingForReply` only).
+     * @returns {string[]} ACTION values. Take over anyway joins `waitingForReply` after
+     *     FORCE_OFFER_AFTER_MS; a holder, `claiming` and unknown reasons offer nothing.
+     */
+    function actionsFor(reason, waitedMs) {
+        if (reason === PARK_REASON.waitingForReply) return waitedMs >= FORCE_OFFER_AFTER_MS ? [ACTION.takeOverAnyway] : [];
+        if (typeof reason !== 'string' || !Object.prototype.hasOwnProperty.call(ACTIONS_BY_REASON, reason)) return [];
+        return ACTIONS_BY_REASON[reason].slice();
     }
 
     /**
@@ -338,11 +407,11 @@
         if (leaseRead.kind === 'unknownFormat' || markerRead.kind === 'unknownFormat') {
             return { action: 'park', reason: PARK_REASON.unknownFormat };
         }
-        if (leaseRead.kind === 'unreadable') return { action: 'park', reason: PARK_REASON.unreadable };
+        if (leaseRead.kind === 'unreadable') return { action: 'park', reason: unreadableReason(leaseRead) };
         if (leaseRead.kind === 'missing') return { action: 'claim' };
         const lease = leaseRead.lease;
         if (tabOf(lease.holder) === tabId) return { action: 'bump', from: { holder: lease.holder, epoch: lease.epoch } };
-        if (markerRead.kind === 'unreadable') return { action: 'park', reason: PARK_REASON.unreadable };
+        if (markerRead.kind === 'unreadable') return { action: 'park', reason: unreadableReason(markerRead) };
         if (isReleased(leaseRead, markerRead)) return { action: 'claim' };
         return { action: 'park', reason: PARK_REASON.held };
     }
@@ -379,7 +448,7 @@
      */
     function decideClaim(read, base, pageId, claimedAt) {
         if (read.kind === 'unknownFormat') return { action: 'park', reason: PARK_REASON.unknownFormat };
-        if (read.kind === 'unreadable') return { action: 'retry', reason: PARK_REASON.unreadable };
+        if (read.kind === 'unreadable') return { action: 'retry', reason: unreadableReason(read) };
         const epoch = base ? base.epoch + 1 : 1;
         if (read.kind === 'missing') {
             if (base) return { action: 'retry', reason: PARK_REASON.unreadable };
@@ -403,6 +472,32 @@
     }
 
     /**
+     * What a forced claim (Take over anyway, spec E4) builds on, from the lease read when it starts:
+     * only a readable lease of a known format gives its epoch and `active`. Nothing else is needed.
+     * @param {{ kind: string, lease?: object }} read Result of reading the lease.
+     * @returns {{ epoch: number, active: object|null }} The epoch to write and the chat to carry over.
+     */
+    function forceBase(read) {
+        if (read.kind !== 'ok') return { epoch: 1, active: null };
+        return { epoch: read.lease.epoch + 1, active: read.lease.active };
+    }
+
+    /**
+     * Decides a forced claim's write (Take over anyway, spec E4) against the lease just re-read: always
+     * written over whatever the file holds (damaged, unknown format, busy, another holder), unless an
+     * earlier attempt already landed.
+     * @param {{ kind: string, lease?: object }} read Result of re-reading the lease.
+     * @param {{ holder: string, epoch: number }} pair The forced pair (a new holder id).
+     * @param {string} claimedAt Informational timestamp.
+     * @param {object|null} active The chat to carry over (forceBase).
+     * @returns {{ action: 'write', lease: object } | { action: 'skip', lease: object }} What to do.
+     */
+    function decideForceClaim(read, pair, claimedAt, active) {
+        if (read.kind === 'ok' && holdsPair(read.lease, pair)) return { action: 'skip', lease: read.lease };
+        return { action: 'write', lease: claimLease(pair.holder, pair.epoch, claimedAt, active) };
+    }
+
+    /**
      * The verify after a claim or an epoch bump (pair rule, spec E2): the lease must hold this pair.
      * @param {{ kind: string, lease?: object }} read Result of re-reading the lease.
      * @param {{ holder: string, epoch: number }} pair The pair just written.
@@ -411,7 +506,7 @@
      */
     function decideVerify(read, pair, lostReason) {
         if (read.kind === 'unknownFormat') return { ok: false, reason: PARK_REASON.unknownFormat };
-        if (read.kind === 'unreadable') return { ok: false, reason: PARK_REASON.unreadable };
+        if (read.kind === 'unreadable') return { ok: false, reason: unreadableReason(read) };
         if (read.kind === 'missing' || !holdsPair(read.lease, pair)) return { ok: false, reason: lostReason };
         return { ok: true };
     }
@@ -657,11 +752,14 @@
     /**
      * What a write's caller is told when every attempt failed (spec E3).
      * @param {string} kind One of WRITE_KIND.
-     * @returns {{ status: 'parked', reason: string } | { status: 'failed' }} Claims and bumps park; the
-     *     holder's `busy` / `active` updates fail and the page stays holder.
+     * @returns {{ status: 'parked', reason: string } | { status: 'failed' }} Claims (forced too) and bumps
+     *     park as `error` (reads worked, writes didn't); the holder's `busy` / `active` updates fail and
+     *     the page stays holder.
      */
     function exhaustedOutcome(kind) {
-        if (kind === WRITE_KIND.claim || kind === WRITE_KIND.bump) return { status: 'parked', reason: PARK_REASON.unreadable };
+        if (kind === WRITE_KIND.claim || kind === WRITE_KIND.bump || kind === WRITE_KIND.force) {
+            return { status: 'parked', reason: PARK_REASON.error };
+        }
         return { status: 'failed' };
     }
 
@@ -776,9 +874,17 @@
      *     sessionStorage. Errors are caught: no storage means no automatic claim and a new id per load.
      * @param {(level: string, message: string, details?: object) => void} deps.log Logger: events,
      *     reasons, paths and counts only.
+     * @param {Promise<void>} [deps.whenActive] The start decision waits for it (spec E4: a prerendered
+     *     page never decides). Default: at once.
+     * @param {Function} [deps.setTimeout] Timer for the lease I/O bound (LEASE_FETCH_TIMEOUT_MS). Default:
+     *     the global one.
+     * @param {Function} [deps.clearTimeout] Clears it.
      * @returns {object} The lease for this page.
      */
-    function createSessionLease({ fetch, post, now, sleep, storage, log }) {
+    function createSessionLease({
+        fetch, post, now, sleep, storage, log, whenActive = Promise.resolve(),
+        setTimeout: setTimer = (fn, ms) => setTimeout(fn, ms), clearTimeout: clearTimer = (id) => clearTimeout(id),
+    }) {
         const state = {
             queue: Promise.resolve(),
             /** A `busy: false` that couldn't be written yet: sent with the holder's next lease write. */
@@ -792,64 +898,119 @@
          *     404 is missing; anything else that isn't a 2xx JSON answer is unreadable.
          */
         async function readFile(name) {
-            let response;
+            let answer;
             try {
-                response = await fetch(USER_FILES_PATH + name, { cache: 'no-store' });
+                answer = await withTimeout(async (signal) => {
+                    const response = await fetch(USER_FILES_PATH + name, { cache: 'no-store', signal });
+                    const text = response.ok ? await response.text() : '';
+                    return { status: response.status, ok: response.ok, text };
+                });
             } catch (error) {
-                return { kind: 'unreadable', why: 'network' };
+                return { kind: 'unreadable', why: error && error.timedOut ? 'timeout' : 'network' };
             }
-            if (response.status === 404) return { kind: 'missing' };
-            if (!response.ok) return { kind: 'unreadable', why: 'status ' + response.status };
+            if (answer.status === 404) return { kind: 'missing' };
+            if (!answer.ok) return { kind: 'unreadable', why: 'status ' + answer.status };
             try {
-                return { kind: 'json', value: JSON.parse(await response.text()) };
+                return { kind: 'json', value: JSON.parse(answer.text) };
             } catch (error) {
-                return { kind: 'unreadable', why: 'json' };
+                return { kind: 'unreadable', why: 'json', damaged: true };
             }
         }
 
         /**
+         * Runs one lease request (fetch and body) within LEASE_FETCH_TIMEOUT_MS: aborted and rejected
+         * (`timedOut: true`) when ST hasn't answered by then (spec E2, E3).
+         * @param {(signal: AbortSignal|undefined) => Promise<T>} task The request; passes the signal to fetch.
+         * @returns {Promise<T>} The task's result.
+         * @throws {Error} The task's error, or a timeout error with `timedOut: true`.
+         * @template T
+         */
+        function withTimeout(task) {
+            const controller = typeof AbortController === 'function' ? new AbortController() : null;
+            let timer = null;
+            const timedOut = new Promise((resolve, reject) => {
+                timer = setTimer(() => {
+                    if (controller) controller.abort();
+                    reject(Object.assign(new Error('lease request timed out'), { timedOut: true }));
+                }, LEASE_FETCH_TIMEOUT_MS);
+            });
+            const run = Promise.resolve().then(() => task(controller ? controller.signal : undefined));
+            return Promise.race([run, timedOut]).finally(() => clearTimer(timer));
+        }
+
+        /**
+         * Validates a file read: a 2xx answer that doesn't parse is `damaged` (spec E2, E9).
+         * @param {object} file Result of readFile.
+         * @param {(value: unknown) => object} parse parseLease or parseMarker.
+         * @returns {object} The parsed read; an unreadable one carries `damaged` when ST answered 2xx.
+         */
+        function validated(file, parse) {
+            if (file.kind !== 'json') return file;
+            const read = parse(file.value);
+            return read.kind === 'unreadable' ? Object.assign({}, read, { damaged: true }) : read;
+        }
+
+        /**
          * Reads and validates the lease.
-         * @returns {Promise<{ kind: 'ok', lease: object } | { kind: 'missing' } | { kind: 'unknownFormat' } | { kind: 'unreadable', why: string }>}
+         * @returns {Promise<{ kind: 'ok', lease: object } | { kind: 'missing' } | { kind: 'unknownFormat' } | { kind: 'unreadable', why: string, damaged?: true }>}
          *     The lease, or why there is none.
          */
         async function readLease() {
-            const file = await readFile(LEASE_FILE);
-            const read = file.kind === 'json' ? parseLease(file.value) : file;
-            if (read.kind === 'unreadable') log('warn', 'lease unreadable', { why: read.why });
+            const read = validated(await readFile(LEASE_FILE), parseLease);
+            if (read.kind === 'unreadable') log('warn', 'lease unreadable', { why: read.why, damaged: read.damaged === true });
             return read;
         }
 
         /**
          * Reads and validates the release marker.
-         * @returns {Promise<{ kind: 'ok', marker: object } | { kind: 'missing' } | { kind: 'unknownFormat' } | { kind: 'unreadable', why: string }>}
+         * @returns {Promise<{ kind: 'ok', marker: object } | { kind: 'missing' } | { kind: 'unknownFormat' } | { kind: 'unreadable', why: string, damaged?: true }>}
          *     The marker, or why there is none.
          */
         async function readMarker() {
-            const file = await readFile(RELEASE_FILE);
-            const read = file.kind === 'json' ? parseMarker(file.value) : file;
-            if (read.kind === 'unreadable') log('warn', 'release marker unreadable', { why: read.why });
+            const read = validated(await readFile(RELEASE_FILE), parseMarker);
+            if (read.kind === 'unreadable') log('warn', 'release marker unreadable', { why: read.why, damaged: read.damaged === true });
             return read;
         }
 
         /**
-         * Uploads a file through ST's upload endpoint.
+         * Uploads a file through ST's upload endpoint, within LEASE_FETCH_TIMEOUT_MS.
          * @param {string} name File name.
          * @param {object} value JSON content.
-         * @param {object} [extra] Extra fetch options (`keepalive` for the release).
+         * @returns {Promise<'ok'|'failed'|'unreachable'>} 2xx; another answer (e.g. `EPERM` as 500); or no
+         *     answer (a network error or the timeout: ST can't be reached).
+         */
+        async function upload(name, value) {
+            try {
+                const ok = await withTimeout(async (signal) => (await fetch(UPLOAD_PATH, uploadInit(name, value, { signal }))).ok);
+                return ok ? 'ok' : 'failed';
+            } catch (error) {
+                return 'unreachable';
+            }
+        }
+
+        /**
+         * The release marker's upload (spec E5): `keepalive`, no timeout (the page is leaving or freezing;
+         * nothing waits for it).
+         * @param {string} name File name.
+         * @param {object} value JSON content.
          * @returns {Promise<boolean>} True when ST answered 2xx.
          */
-        async function uploadFile(name, value, extra) {
+        async function uploadKeepalive(name, value) {
             try {
-                const response = await fetch(UPLOAD_PATH, Object.assign({
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: uploadBody(name, value),
-                    cache: 'no-store',
-                }, extra));
-                return response.ok;
+                return (await fetch(UPLOAD_PATH, uploadInit(name, value, { keepalive: true }))).ok;
             } catch (error) {
                 return false;
             }
+        }
+
+        /** fetch options for an upload. */
+        function uploadInit(name, value, extra) {
+            return Object.assign({
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: uploadBody(name, value),
+                cache: 'no-store',
+            }, extra);
         }
 
         /**
@@ -877,6 +1038,7 @@
          */
         async function writeWithRetry(kind, decide) {
             let lastReadFailure = null;
+            let lastWriteUnreachable = false;
             for (let attempt = 1; attempt <= WRITE_ATTEMPTS; attempt++) {
                 if (attempt > 1) await sleep(RETRY_MIN_MS + Math.floor(Math.random() * (RETRY_MAX_MS - RETRY_MIN_MS + 1)));
                 const decision = decide(await readLease());
@@ -888,11 +1050,16 @@
                     continue;
                 }
                 lastReadFailure = null;
-                if (await uploadFile(LEASE_FILE, decision.lease)) return { status: 'written', lease: decision.lease };
-                log('warn', 'lease write failed', { kind, attempt });
+                const result = await upload(LEASE_FILE, decision.lease);
+                if (result === 'ok') return { status: 'written', lease: decision.lease };
+                lastWriteUnreachable = result === 'unreachable';
+                log('warn', 'lease write failed', { kind, attempt, unreachable: lastWriteUnreachable });
             }
             if (lastReadFailure) return { status: 'parked', reason: lastReadFailure };
-            return exhaustedOutcome(kind);
+            const outcome = exhaustedOutcome(kind);
+            // No answer to the last write (network error, timeout): ST can't be reached, not a refused write.
+            if (outcome.status === 'parked' && lastWriteUnreachable) return { status: 'parked', reason: PARK_REASON.unreadable };
+            return outcome;
         }
 
         /**
@@ -1007,6 +1174,10 @@
             /** The epoch held in this load, kept after parking (`leaseState.epoch`). */
             heldEpoch: null,
             claiming: false,
+            /** When the claim's wait for `busy` started (`now()` ms), null outside it (spec E4, E9). */
+            waitStartedAt: null,
+            /** Take over anyway was tapped during the wait for `busy`; the wait ends at its next step. */
+            forceRequested: false,
             /** Set by release(): the claim was given up on `pagehide` or `freeze` (spec E5). */
             released: false,
             /** What released the claim (`pagehide` or `freeze`) and the pair given up; read on `resume`. */
@@ -1062,11 +1233,23 @@
                 epoch: page.heldEpoch,
                 busy: page.busy,
                 connected: page.connected,
+                actions: currentActions(),
             };
             const key = JSON.stringify(payload);
             if (key === page.lastReport) return;
             page.lastReport = key;
             post('leaseState', payload);
+        }
+
+        /**
+         * The ways out this page offers now (spec E9, E11), primary first. Nothing while deciding, as
+         * holder, or once released on `pagehide` / `freeze`.
+         * @returns {string[]} ACTION values.
+         */
+        function currentActions() {
+            if (page.phase !== PHASE.parked || page.released) return [];
+            const waited = page.waitStartedAt === null ? 0 : now() - page.waitStartedAt;
+            return actionsFor(page.reason, waited);
         }
 
         /**
@@ -1117,15 +1300,18 @@
             return page.startPromise;
         }
 
-        /** A lease bug parks the page, never lets requests through. */
+        /** A lease bug parks the page (`error`, with its ways out), never lets requests through. */
         function failed(step, error) {
             log('error', step + ' failed', { error: String(error && error.message) });
             page.claiming = false;
-            return park(PARK_REASON.unreadable);
+            page.waitStartedAt = null;
+            page.forceRequested = false;
+            return park(PARK_REASON.error);
         }
 
-        /** The start decision's steps. */
+        /** The start decision's steps. A prerendered page waits until it is shown (spec E4). */
         async function runStart() {
+            await whenActive;
             const [leaseRead, markerRead] = await readBoth();
             const decision = decideStart(leaseRead, markerRead, tabId);
             if (decision.action === 'park') return park(decision.reason);
@@ -1167,14 +1353,16 @@
          * Claims the lease (spec E4 steps 1–6). On success the page stays parked (`claiming`, requests
          * held) and the caller aborts held chat saves and reloads.
          * @param {string} kind One of CLAIM_KIND.
+         * @param {{ force?: boolean }} [options] `force`: Take over anyway (runForceClaim).
          * @returns {Promise<{ status: 'reload', pair: object } | { status: 'parked', reason: string }>} The outcome.
          */
-        async function claim(kind) {
+        async function claim(kind, { force = false } = {}) {
             page.claiming = true;
+            page.forceRequested = false;
             park(PARK_REASON.claiming);
             let outcome;
             try {
-                outcome = await runClaim(kind);
+                outcome = await (force ? runForceClaim(kind) : runClaim(kind));
             } catch (error) {
                 return failed('claim', error);
             }
@@ -1182,17 +1370,18 @@
             return outcome;
         }
 
-        /** The claim's steps. */
+        /** The claim's steps. Take over anyway during the wait for `busy` switches to the forced claim. */
         async function runClaim(kind) {
             const [leaseRead, markerRead] = await readBoth();
             if (leaseRead.kind === 'unknownFormat' || markerRead.kind === 'unknownFormat') return park(PARK_REASON.unknownFormat);
-            if (leaseRead.kind === 'unreadable') return park(PARK_REASON.unreadable);
+            if (leaseRead.kind === 'unreadable') return park(unreadableReason(leaseRead));
             let base = leaseRead.kind === 'ok' ? leaseRead.lease : null;
             if (base && base.busy && !isReleased(leaseRead, markerRead)) {
                 const waited = await waitForReply(base);
                 if (waited.status === 'parked') return waited;
-                base = waited.base;
                 park(PARK_REASON.claiming);
+                if (waited.status === 'force') return runForceClaim(kind);
+                base = waited.base;
             }
             const claimedAt = timestamp();
             const written = await enqueue(() => writeWithRetry(WRITE_KIND.claim, (read) => decideClaim(read, base, page.id, claimedAt)));
@@ -1201,26 +1390,97 @@
             await sleep(GRACE_MS);
             const verified = decideVerify(await readLease(), pair, PARK_REASON.lostRace);
             if (!verified.ok) return park(verified.reason);
+            return claimed(kind, pair);
+        }
+
+        /** A verified claim: sets the reopen flag; the caller aborts held chat saves and reloads. */
+        function claimed(kind, pair) {
             if (!storageSet(STORAGE_KEYS.reopen, kind)) log('warn', 'reopen flag not stored: the chat will not reopen');
             log('info', 'claimed, reloading', { kind, epoch: pair.epoch });
             return { status: 'reload', pair };
         }
 
         /**
+         * Take over anyway (spec E4): a claim written over whatever the lease file holds, after the user
+         * confirmed a warning. No wait for `busy`, nothing has to match: a new holder id (this tab, a new
+         * load id), so every other page parks by the pair rule. A damaged or unknown-format release
+         * marker is first replaced by one that matches nothing. Then the grace and the verify, as a claim.
+         * @param {string} kind The claim's CLAIM_KIND (reopen and reconnect after the reload).
+         * @returns {Promise<{ status: 'reload', pair: object } | { status: 'parked', reason: string }>} The outcome.
+         */
+        async function runForceClaim(kind) {
+            page.forceRequested = false;
+            const [leaseRead, markerRead] = await readBoth();
+            const { epoch, active } = forceBase(leaseRead);
+            const pair = { holder: tabId + '.' + randomHex(8), epoch };
+            log('warn', 'taking over anyway', { lease: leaseRead.kind, marker: markerRead.kind });
+            // Writes that fail after a read that couldn't reach ST: the server is down, not the writes.
+            const unreachable = [leaseRead, markerRead].some((read) => read.kind === 'unreadable' && read.damaged !== true);
+            const writeFailed = unreachable ? PARK_REASON.unreadable : PARK_REASON.error;
+            if (markerRead.kind === 'unknownFormat' || markerRead.damaged === true) {
+                const fresh = markerFor({ holder: 'r' + randomHex(8) + '.' + randomHex(8), epoch: 1 }, timestamp());
+                const repaired = await enqueue(() => uploadWithRetry(RELEASE_FILE, fresh));
+                if (repaired !== 'ok') return park(repaired === 'unreachable' ? PARK_REASON.unreadable : writeFailed);
+            }
+            const claimedAt = timestamp();
+            const written = await enqueue(() => writeWithRetry(WRITE_KIND.force, (read) => decideForceClaim(read, pair, claimedAt, active)));
+            if (written.status === 'parked') return park(written.reason === PARK_REASON.error ? writeFailed : written.reason);
+            await sleep(GRACE_MS);
+            const verified = decideVerify(await readLease(), pair, PARK_REASON.lostRace);
+            if (!verified.ok) return park(verified.reason);
+            return claimed(kind, pair);
+        }
+
+        /**
+         * Uploads a file with the bounded retry (spec E3): at most WRITE_ATTEMPTS, a random 100–200 ms
+         * apart. For the forced claim's marker repair, which builds on nothing.
+         * @param {string} name File name.
+         * @param {object} value JSON content.
+         * @returns {Promise<'ok'|'failed'|'unreachable'>} Accepted, or the last attempt's failure.
+         */
+        async function uploadWithRetry(name, value) {
+            let result = 'failed';
+            for (let attempt = 1; attempt <= WRITE_ATTEMPTS; attempt++) {
+                if (attempt > 1) await sleep(RETRY_MIN_MS + Math.floor(Math.random() * (RETRY_MAX_MS - RETRY_MIN_MS + 1)));
+                result = await upload(name, value);
+                if (result === 'ok') return result;
+                log('warn', 'file write failed', { name, attempt });
+            }
+            return result;
+        }
+
+        /**
          * Waits for the holder's reply to finish (spec E4 step 2): re-reads once per second for at most
-         * 60 s. The one named polling exception: bounded, only during a claim.
+         * 60 s. The one named polling exception: bounded, only during a claim. Each step re-reports, so
+         * Take over anyway is offered once FORCE_OFFER_AFTER_MS have passed; a tap ends the wait at the
+         * next step.
          * @param {object} base The busy lease.
-         * @returns {Promise<{ status: 'continue', base: object|null } | { status: 'parked', reason: string }>}
-         *     Continue the claim on top of `base`, or parked.
+         * @returns {Promise<{ status: 'continue', base: object|null } | { status: 'force' } | { status: 'parked', reason: string }>}
+         *     Continue the claim on top of `base`, take over anyway, or parked.
          */
         async function waitForReply(base) {
-            park(PARK_REASON.waitingForReply);
+            // A tap from an earlier wait that ended on its own must not force this one.
+            page.forceRequested = false;
+            page.waitStartedAt = now();
+            try {
+                park(PARK_REASON.waitingForReply);
+                return await waitSteps(base);
+            } finally {
+                page.waitStartedAt = null;
+            }
+        }
+
+        /** The wait's steps (waitForReply). */
+        async function waitSteps(base) {
             const basePair = { holder: base.holder, epoch: base.epoch };
-            const startedAt = now();
+            const startedAt = page.waitStartedAt;
             let latest = base;
             while (now() - startedAt < BUSY_WAIT_MAX_MS) {
                 await sleep(BUSY_WAIT_INTERVAL_MS);
+                if (page.forceRequested) return { status: 'force' };
+                report();
                 const [leaseRead, markerRead] = await readBoth();
+                if (page.forceRequested) return { status: 'force' };
                 const step = decideWaitStep(leaseRead, markerRead, basePair);
                 if (step.action === 'park') return park(step.reason);
                 if (step.action === 'continue') return { status: 'continue', base: step.base };
@@ -1231,17 +1491,29 @@
         }
 
         /**
-         * Use here (spec E4, E11): claims if parked and not already claiming. Never with an unknown
-         * format (the page offers no Use here then).
+         * Use here (spec E4, E11): claims if parked, not already claiming, and Use here is offered.
          * @returns {Promise<{ status: 'reload', pair: object } | { status: 'parked', reason: string } | { status: 'ignored' }>}
          *     The outcome.
          */
         function useHere() {
-            const noUseHere = page.reason === PARK_REASON.unknownFormat || page.reason === PARK_REASON.reloadPending;
-            if (page.phase !== PHASE.parked || page.claiming || page.released || noUseHere) {
-                return Promise.resolve({ status: 'ignored' });
-            }
+            if (page.claiming || !currentActions().includes(ACTION.useHere)) return Promise.resolve({ status: 'ignored' });
             return claim(CLAIM_KIND.useHere);
+        }
+
+        /**
+         * Take over anyway (spec E4, E11), only while offered; the caller showed the warning. During the
+         * wait for `busy` the running claim switches to the forced one at its next step and reloads
+         * itself, so this resolves `forcing` (no second reload).
+         * @returns {Promise<{ status: 'reload', pair: object } | { status: 'parked', reason: string } | { status: 'forcing' } | { status: 'ignored' }>}
+         *     The outcome.
+         */
+        function takeOverAnyway() {
+            if (!currentActions().includes(ACTION.takeOverAnyway)) return Promise.resolve({ status: 'ignored' });
+            if (page.claiming) {
+                page.forceRequested = true;
+                return Promise.resolve({ status: 'forcing' });
+            }
+            return claim(CLAIM_KIND.useHere, { force: true });
         }
 
         /**
@@ -1262,7 +1534,7 @@
             page.pair = null;
             page.released = true;
             log('info', 'releasing', { epoch: marker.epoch });
-            return uploadFile(RELEASE_FILE, marker, { keepalive: true });
+            return uploadKeepalive(RELEASE_FILE, marker);
         }
 
         /**
@@ -1760,6 +2032,9 @@
             hasPendingBusyClear: () => state.pendingBusyClear,
             start,
             useHere,
+            takeOverAnyway,
+            /** The ways out offered now (`leaseState.actions`). */
+            actions: currentActions,
             release,
             restoredFromCache,
             resumeAfterFreeze,
@@ -1798,8 +2073,15 @@
         GRACE_MS,
         BUSY_WAIT_INTERVAL_MS,
         BUSY_WAIT_MAX_MS,
+        FORCE_OFFER_AFTER_MS,
         SAVE_WAIT_MAX_MS,
         STORAGE_KEYS,
+        OFF_ONCE_NAME_PREFIX,
+        PARK_REASON,
+        ACTION,
+        actionsFor,
+        forceBase,
+        decideForceClaim,
         parseLease,
         parseMarker,
         holdsPair,
@@ -1841,6 +2123,7 @@
         READ_WINDOW_MS,
         CSRF_ORDER_MAX_WAIT_MS,
         RELOAD_FALLBACK_MS,
+        LEASE_FETCH_TIMEOUT_MS,
     };
 
     // ---- Browser install (thin: wiring only) ---------------------------------------------------
@@ -1860,13 +2143,25 @@
         let token = null;
         let pending = fetchToken();
 
+        /** The lease's own token, within LEASE_FETCH_TIMEOUT_MS (a hung answer must not stall every write). */
         async function fetchToken() {
+            const controller = typeof AbortController === 'function' ? new AbortController() : null;
+            let timer = null;
             try {
-                const response = await fetch(CSRF_TOKEN_PATH, { cache: 'no-store' });
-                const data = response.ok ? await response.json() : null;
+                const data = await new Promise((resolve, reject) => {
+                    timer = setTimeout(() => {
+                        if (controller) controller.abort();
+                        reject(new Error('CSRF token request timed out'));
+                    }, LEASE_FETCH_TIMEOUT_MS);
+                    fetch(CSRF_TOKEN_PATH, { cache: 'no-store', signal: controller ? controller.signal : undefined })
+                        .then((response) => (response.ok ? response.json() : null))
+                        .then(resolve, reject);
+                });
                 token = data && typeof data.token === 'string' ? data.token : null;
             } catch (error) {
                 token = null;
+            } finally {
+                clearTimeout(timer);
             }
             if (token === null) log('warn', 'CSRF token not available; lease writes will fail closed');
         }
@@ -2326,8 +2621,130 @@
         });
     }
 
+    /**
+     * Reads (and consumes) the off mark (spec E4 → Turn off protection): the sessionStorage flag, kept
+     * until Turn protection back on, or the one-load `window.name` prefix used when storage is blocked.
+     * The prefix counts only when sessionStorage can't be written in this load and the load is a reload
+     * (Turn off protection always reloads): another site can name a window it opens, so a prefix on any
+     * other load is removed and ignored.
+     * @param {Window} win The page's window.
+     * @returns {boolean} True when protection is off in this load.
+     */
+    function takeOffMark(win) {
+        let off = false;
+        try {
+            off = win.sessionStorage.getItem(STORAGE_KEYS.off) === '1';
+        } catch (error) {
+            off = false;
+        }
+        const name = typeof win.name === 'string' ? win.name : '';
+        if (name.startsWith(OFF_ONCE_NAME_PREFIX)) {
+            win.name = name.slice(OFF_ONCE_NAME_PREFIX.length);
+            if (!sessionStorageWorks(win) && isReloadNavigation(win)) off = true;
+        }
+        return off;
+    }
+
+    /** Whether this load can write sessionStorage (a probe key, removed at once). */
+    function sessionStorageWorks(win) {
+        try {
+            win.sessionStorage.setItem(STORAGE_KEYS.off + '-probe', '1');
+            win.sessionStorage.removeItem(STORAGE_KEYS.off + '-probe');
+            return true;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    /** Whether this load is a reload (Navigation Timing); anything unreadable is not. */
+    function isReloadNavigation(win) {
+        try {
+            const entry = win.performance.getEntriesByType('navigation')[0];
+            return Boolean(entry) && entry.type === 'reload';
+        } catch (error) {
+            return false;
+        }
+    }
+
+    /**
+     * Sets the off mark for this tab: the sessionStorage flag, or, if storage is blocked, the
+     * `window.name` prefix for the next load only (spec E4).
+     * @param {Window} win The page's window.
+     * @param {Function} log Logger.
+     * @returns {void}
+     */
+    function setOffMark(win, log) {
+        try {
+            win.sessionStorage.setItem(STORAGE_KEYS.off, '1');
+            return;
+        } catch (error) {
+            log('warn', 'no sessionStorage: protection off for the next load only');
+        }
+        win.name = OFF_ONCE_NAME_PREFIX + (typeof win.name === 'string' ? win.name : '');
+    }
+
+    /** Removes the off mark (Turn protection back on); errors ignored. */
+    function clearOffMark(win) {
+        try {
+            win.sessionStorage.removeItem(STORAGE_KEYS.off);
+        } catch (error) {
+            // Storage blocked: the flag can't be there either.
+        }
+    }
+
+    /**
+     * Protection is off in this tab (spec E4, E11): the lease stands down for this load. No wrapper,
+     * no lease reads or writes, no claim; `window.__ttLease` is still defined (a second copy stands
+     * down) and reports `leaseState` `state: 'off'` with Turn protection back on, which reloads protected.
+     * @param {Window} win The page's window.
+     * @param {string} source `app` or `extension`.
+     * @param {Function} log Logger.
+     * @returns {boolean} True (installed, off).
+     */
+    function installOff(win, source, log) {
+        log('warn', 'protection is off in this tab');
+        const post = makePost(win);
+        const report = () => post('leaseState', {
+            state: 'off',
+            reason: null,
+            pageId: null,
+            epoch: null,
+            busy: false,
+            connected: false,
+            actions: [ACTION.turnProtectionOn],
+            origin: win.location.origin,
+        });
+        const ignored = () => Promise.resolve({ status: 'ignored' });
+        const api = Object.freeze({
+            version: LEASE_VERSION,
+            source,
+            useHere: ignored,
+            onForeground: () => {
+                report();
+                return Promise.resolve({ status: 'off' });
+            },
+            takeOverAnyway: ignored,
+            turnOffProtection: () => false,
+            turnProtectionOn: () => {
+                clearOffMark(win);
+                log('info', 'protection back on: reloading');
+                win.location.reload();
+                return true;
+            },
+            refresh: () => false,
+        });
+        Object.defineProperty(win, '__ttLease', { value: api, writable: false, configurable: false, enumerable: false });
+        report();
+        readStVersion(win.fetch.bind(win)).then((stVersion) => {
+            const sendLeaseInfo = () => post('leaseInfo', buildLeaseInfo(stVersion, win.__ttExtension));
+            sendLeaseInfo();
+            win.addEventListener('tt-extension-ready', sendLeaseInfo);
+        });
+        return true;
+    }
+
     /** The lease for this page, its CSRF client and reports wired to the window. */
-    function createPageLease(win, originalFetch, log) {
+    function createPageLease(win, originalFetch, log, whenActive) {
         const csrf = createCsrfClient({
             fetch: originalFetch,
             setTimeout: (fn, ms) => win.setTimeout(fn, ms),
@@ -2344,42 +2761,74 @@
             sleep: (ms) => new Promise((resolve) => win.setTimeout(resolve, ms)),
             storage: pageStorage(win),
             log,
+            whenActive,
+            setTimeout: (fn, ms) => win.setTimeout(fn, ms),
+            clearTimeout: (id) => win.clearTimeout(id),
         });
         return { lease, csrf, post };
     }
 
     /**
      * Installs the lease in a page: main frame only, never on ST's login page, once per page (a second
-     * copy stands down completely). `window.__ttLease` is frozen and has no off switch (spec E11).
+     * copy stands down completely). `window.__ttLease` is frozen; only the user can turn protection off,
+     * in one tab, after a warning (Turn off protection, spec E4, E11). `__ttLease` is defined before the
+     * wrapper, so an install error can't leave held requests behind an overlay whose buttons do nothing.
+     * A page installed while Chrome prerenders it never decides; it reloads when shown (spec E4).
      * @param {Window} win The page's window.
-     * @returns {boolean} True when installed now.
+     * @returns {boolean} True when installed now (protected or off).
      */
     function install(win) {
         if (!isMainFrame(win) || isLoginPage(win.location.pathname)) return false;
         if (Object.prototype.hasOwnProperty.call(win, '__ttLease')) return false;
         const source = win.__ttLeaseSource === 'extension' ? 'extension' : 'app';
         const log = makeLog(win.console);
+        if (takeOffMark(win)) return installOff(win, source, log);
+        const doc = win.document;
+        const prerendering = Boolean(doc) && doc.prerendering === true;
         const originalFetch = win.fetch.bind(win);
-        const { lease, csrf, post } = createPageLease(win, originalFetch, log);
+        // A prerendered page's start decision never runs: requests wait, and the page reloads when shown.
+        const whenActive = prerendering ? new Promise(() => {}) : Promise.resolve();
+        const { lease, csrf, post } = createPageLease(win, originalFetch, log, whenActive);
         const makeAbortError = () => new win.DOMException('TravelingTavern: request held while parked', 'AbortError');
         const held = createHeldRegistry(makeAbortError);
         const ctx = { lease, held, csrf, originalFetch, makeAbortError, log };
-        wrapFetch(win, ctx);
-        wrapXhr(win, ctx);
-        wrapBeacon(win, ctx);
 
         const reloadPage = () => reloadAfterAborts(win, lease, held, log);
         const afterOutcome = (outcome) => {
             if (outcome && outcome.status === 'reload') reloadPage();
         };
+        const offered = (action) => lease.actions().includes(action);
         const api = Object.freeze({
             version: LEASE_VERSION,
             source,
             useHere: () => lease.useHere().then(afterOutcome),
             onForeground: () => lease.onForeground().then(afterOutcome),
+            takeOverAnyway: () => lease.takeOverAnyway().then(afterOutcome),
+            turnOffProtection: () => {
+                if (!offered(ACTION.turnOffProtection)) return false;
+                setOffMark(win, log);
+                log('warn', 'turning protection off in this tab: reloading');
+                reloadPage();
+                return true;
+            },
+            turnProtectionOn: () => false,
+            refresh: () => {
+                if (!offered(ACTION.refresh)) return false;
+                reloadPage();
+                return true;
+            },
         });
         Object.defineProperty(win, '__ttLease', { value: api, writable: false, configurable: false, enumerable: false });
+        wrapFetch(win, ctx);
+        wrapXhr(win, ctx);
+        wrapBeacon(win, ctx);
 
+        if (prerendering) {
+            doc.addEventListener('prerenderingchange', () => {
+                log('info', 'prerendered page shown: reloading');
+                reloadPage();
+            }, { once: true });
+        }
         // The app releases from Kotlin (app spec A5).
         if (source === 'extension') wireDesktopRelease(win, lease, reloadPage);
         startAndReport(win, lease, post, originalFetch, afterOutcome);
