@@ -42,7 +42,11 @@ test('a lease still missing or unreadable after every attempt parks; unknown for
     const h = createHarness();
     assert.deepStrictEqual(await h.lease.updateLease({ holder: 'page-a', epoch: 3 }, { busy: true }), { status: 'parked', reason: 'lost' });
     h.setFile(LEASE, 'not json');
+    assert.deepStrictEqual(await h.lease.updateLease({ holder: 'page-a', epoch: 3 }, { busy: true }), { status: 'parked', reason: 'damaged' });
+    h.setFile(LEASE, leaseFile({ holder: 'page-a', epoch: 3 }));
+    h.server.readStatus.set(LEASE, 500);
     assert.deepStrictEqual(await h.lease.updateLease({ holder: 'page-a', epoch: 3 }, { busy: true }), { status: 'parked', reason: 'unreadable' });
+    h.server.readStatus.delete(LEASE);
     h.setFile(LEASE, leaseFile({ format: 2 }));
     assert.deepStrictEqual(await h.lease.updateLease({ holder: 'page-a', epoch: 3 }, { busy: true }), { status: 'parked', reason: 'unknownFormat' });
     assert.strictEqual(h.uploads.length, 0, 'nothing written over a file it cannot read');

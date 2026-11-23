@@ -9,7 +9,7 @@ const { buildLeaseInfo, makePost, LEASE_VERSION } = require('../session-lease.js
 const { leaseFile, LEASE } = require('./helpers/fake-server.cjs');
 const { createFakeWindow, flush } = require('./helpers/fake-window.cjs');
 
-const STATE_FIELDS = ['type', 'state', 'reason', 'pageId', 'epoch', 'busy', 'connected', 'origin'].sort();
+const STATE_FIELDS = ['type', 'state', 'reason', 'pageId', 'epoch', 'busy', 'connected', 'actions', 'origin'].sort();
 const INFO_FIELDS = ['type', 'leaseVersion', 'extensionVersion', 'extensionLeaseVersion', 'stVersion', 'untestedServer'].sort();
 
 test('makePost: to the app as a JSON string in the v1 envelope', () => {
@@ -51,6 +51,7 @@ test('desktop: leaseState then leaseInfo as tt-lease events, with exactly the co
     assert.deepStrictEqual(Object.keys(info).sort(), INFO_FIELDS);
     assert.deepStrictEqual([state.state, state.reason, state.epoch, state.busy, state.connected, state.origin], ['parked', 'held', null, false, false, 'http://localhost']);
     assert.match(state.pageId, /^page-a\.[0-9a-f]{16}$/);
+    assert.deepStrictEqual(state.actions, ['useHere']);
     assert.deepStrictEqual([info.stVersion, info.untestedServer, info.extensionVersion], ['1.19.1', false, '0.0.1']);
 });
 

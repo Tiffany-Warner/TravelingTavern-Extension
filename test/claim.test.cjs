@@ -149,12 +149,14 @@ test('a claim that finds a newer format parks (unknownFormat) and writes nothing
     assert.strictEqual(h.uploads.length, 0);
 });
 
-test('a claim write that fails every attempt parks (unreadable); Use here is offered again', async () => {
+test('a claim write that fails every attempt parks (error) with its ways out; Take over anyway then works', async () => {
     const h = await parkedHarness();
     h.server.failUploads = 10;
-    assert.deepStrictEqual(await h.lease.useHere(), { status: 'parked', reason: 'unreadable' });
+    assert.deepStrictEqual(await h.lease.useHere(), { status: 'parked', reason: 'error' });
+    assert.deepStrictEqual(h.lease.actions(), ['refresh', 'takeOverAnyway', 'turnOffProtection']);
+    assert.deepStrictEqual(await h.lease.useHere(), { status: 'ignored' }, 'Use here is not offered on error');
     h.server.failUploads = 0;
-    assert.strictEqual((await h.lease.useHere()).status, 'reload');
+    assert.strictEqual((await h.lease.takeOverAnyway()).status, 'reload');
 });
 
 test('a claim write that landed despite an error answer is verified, not written again', async () => {

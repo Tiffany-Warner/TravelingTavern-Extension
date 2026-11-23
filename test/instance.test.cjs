@@ -26,7 +26,9 @@ test('window.__ttLease: frozen, non-writable, non-configurable, only the contrac
     const w = createFakeWindow();
     w.install();
     const api = w.win.__ttLease;
-    assert.deepStrictEqual(Object.keys(api).sort(), ['onForeground', 'source', 'useHere', 'version']);
+    assert.deepStrictEqual(Object.keys(api).sort(), [
+        'onForeground', 'refresh', 'source', 'takeOverAnyway', 'turnOffProtection', 'turnProtectionOn', 'useHere', 'version',
+    ]);
     assert.strictEqual(Object.isFrozen(api), true);
     assert.strictEqual(api.version, LEASE_VERSION);
     const descriptor = Object.getOwnPropertyDescriptor(w.win, '__ttLease');
@@ -167,4 +169,37 @@ test('index.js versions match manifest.json and session-lease.js', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
     assert.strictEqual(source.match(/const EXTENSION_VERSION = '([^']+)'/)[1], manifest.version);
     assert.strictEqual(Number(source.match(/const LEASE_VERSION = (\d+)/)[1]), LEASE_VERSION);
+});
+
+test('prerendered: no start decision while hidden (requests wait, no lease reads); reloads when shown', async () => {
+    const w = createFakeWindow({ files: { [LEASE]: leaseFile({ holder: 'page-a' }) }, source: 'extension' });
+    w.win.document.prerendering = true;
+    w.install();
+    const request = track(w.win.fetch('/api/settings/save', { method: 'POST' }));
+    await flush();
+    assert.strictEqual(w.server.leaseReads, 0, 'the start decision never ran');
+    assert.strictEqual(w.harness.uploads.length, 0);
+    assert.strictEqual(request.settled(), false);
+    assert.strictEqual(w.server.stRequests.length, 0);
+    assert.deepStrictEqual(w.events, []);
+    w.win.document.prerendering = false;
+    w.fireDocument('prerenderingchange');
+    await flush();
+    assert.strictEqual(w.win.location.reloads, 1, 'a fresh, non-prerendered load decides');
+    assert.strictEqual(w.server.leaseReads, 0);
+    assert.strictEqual(w.server.stRequests.length, 0, 'the waiting request is never sent');
+});
+
+test('an install error after __ttLease is defined: requests still go through the lease, Use here works', async () => {
+    const w = createFakeWindow({ files: { [LEASE]: leaseFile({ holder: 'page-b' }) }, source: 'extension' });
+    Object.defineProperty(w.win, 'navigator', { get() { throw new Error('broken navigator'); } });
+    assert.throws(() => w.install(), /broken navigator/);
+    assert.strictEqual(typeof w.win.__ttLease.useHere, 'function', '__ttLease defined before the wrapper');
+    const request = track(w.win.fetch('/api/chats/save', { method: 'POST' }));
+    await flush();
+    assert.strictEqual(request.settled(), false, 'held while parked');
+    assert.strictEqual(w.events.at(-1).reason, 'held');
+    await w.win.__ttLease.useHere();
+    await flush();
+    assert.strictEqual(w.win.location.reloads, 1);
 });

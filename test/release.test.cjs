@@ -98,7 +98,7 @@ test('resume after freeze, lease unchanged: bumps the epoch, verifies, holds aga
     assert.deepStrictEqual(outcome, { status: 'holder', pair: { holder: id, epoch: 5 } });
     assert.deepStrictEqual([h.leaseFile().holder, h.leaseFile().epoch], [id, 5]);
     assert.ok(h.sleeps.includes(1000), 'grace before the verify');
-    assert.deepStrictEqual(h.posts.at(-1), { type: 'leaseState', state: 'holder', reason: null, pageId: id, epoch: 5, busy: false, connected: false });
+    assert.deepStrictEqual(h.posts.at(-1), { type: 'leaseState', state: 'holder', reason: null, pageId: id, epoch: 5, busy: false, connected: false, actions: [] });
 });
 
 test('resume after freeze, another page claimed meanwhile: parks as lost and writes nothing', async () => {

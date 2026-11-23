@@ -157,10 +157,10 @@ test('an unknown format on a re-read parks at once, no retry', async () => {
     assert.strictEqual(h.sleeps.length, 1);
 });
 
-test('all attempts failed: an epoch bump parks', async () => {
+test('all attempts failed: an epoch bump parks (error: reads worked, writes did not)', async () => {
     const h = holderHarness();
     h.server.failUploads = 10;
-    assert.deepStrictEqual(await h.lease.bumpEpoch(PAIR), { status: 'parked', reason: 'unreadable' });
+    assert.deepStrictEqual(await h.lease.bumpEpoch(PAIR), { status: 'parked', reason: 'error' });
 });
 
 test('all attempts failed: active leaves the page holder (logged)', async () => {
