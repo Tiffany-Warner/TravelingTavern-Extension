@@ -28,6 +28,11 @@
 
 ## History
 
+### 2026-11-22 — Relicense to AGPL-3.0-only
+- `LICENSE` is now the unmodified GNU AGPL v3 text, `package.json` says `AGPL-3.0-only`, README and `coding-standards.md` got a License section; same license as SillyTavern. `manifest.json` unchanged (ST manifests have no license field)
+- Commits before this one, including the `v0.2.0-rc.*` tags, stay Apache 2.0. `main` and GitHub's sidebar show Apache 2.0 until the `v0.2.0` release PR; the app picks it up when it re-pins to `v0.2.0`
+- No code changed: no version bump, `LEASE_VERSION` 1
+
 ### 2026-11-22 — `busy` until the chat save after a reply (for `v0.2.0-rc.4`)
 - The app's slice 10 lost a finished reply: `busy: false` went out when the response ended, the claim landed 205 ms later, and ST's chat save (0.2–1.1 s after the end, later on a hidden page) hit the new pair and was held
 - Fix: after the last reply ends, `busy` stays true until a chat save that started after that end has completed (any status), at most 3 s (then a warning). Not when no longer holder; the headers fallback is unchanged. E15: impersonate saves; errors and `quiet` don't; ST's save wait has no immediate check and can skip the save on a hidden page (E13)
@@ -38,10 +43,5 @@
 - The app's Kotlin pre-check (A4) parks its own scrim on an unreadable or mismatched read and calls `onForeground()` for the page to confirm; a page still holder with an unchanged lease posted nothing (`report()` skips repeats), so the scrim stayed up until a Use here tap timed out
 - Fix: `onForeground` re-posts the current `leaseState` when the call itself posted nothing (holder and parked alike; not when a claim's reload follows), so a bump or a park still posts exactly once. E11 states it
 - Unverified: the app (needs a rebuild with this code). `LEASE_VERSION` 1 (owner decision: stays until the release)
-
-### 2026-11-21 — ST hooks attach in the app's page (for `v0.2.0-rc.2`)
-- In the app's page the lease's `load` listener ran before `script.js` resumed from its `load` wait, so `getContext()` threw a `ReferenceError` (temporal dead zone) and the hooks never attached: no `connected`, no reopen / reconnect after a takeover, no `active` from `CHAT_CHANGED`. Lease safety unaffected; desktop unaffected (the extension loads later)
-- Fix: a `load` attach that can't read the context retries once, one task later (`setTimeout(0)`), then warns as before. Added to the bounded delays (spec E2, E10, `coding-standards.md`); E10, E11 and E15 now state the timing (confirmed in 1.19.1's `script.js`: one top-level `await`)
-- Found by the app's slice 3; unverified: the app (needs a rebuild with this code). `LEASE_VERSION` 1
 
 Older entries: `context/history.md`

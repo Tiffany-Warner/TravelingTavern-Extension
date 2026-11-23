@@ -61,3 +61,8 @@ How to write the code. The rules it serves (fail closed, held never refused, no 
 
 - No commented-out code unless explained, no unused variables, no new dependencies
 - Minimal changes; no reformatting of unrelated code
+
+## License
+
+- This repo is AGPL-3.0-only (matches SillyTavern). No per-file license headers
+- Code copied from elsewhere keeps its own copyright notice, and only from licenses that can be combined with AGPL v3 (MIT, ISC, BSD, Apache 2.0, GPL-3.0, AGPL-3.0). Ask me before anything else
