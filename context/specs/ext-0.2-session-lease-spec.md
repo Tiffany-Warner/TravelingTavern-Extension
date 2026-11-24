@@ -399,7 +399,9 @@ The app's own `window.__ttBridge` is not part of this contract.
 | Switch cost (R22, measured) | Desktop about 3.3 s, phone about 6.6 s from Use here to the reopened chat; about 1.8 s of the phone's is the lease (grace and checks), the rest ST reloading | Server plugin (no reload needed) |
 | A holder that doesn't yet know it lost the lease still releases on `pagehide` (it can't read the lease while leaving) | Its stale marker overwrites the real holder's, so the next page needs **Use here** (one click). Never data: a stale marker frees nothing | Server plugin |
 | A holder that stops without `pagehide` or `freeze` (a crash, a killed process, a discard that skips freezing first; frozen-then-discarded tabs release on `freeze`, E5) | No marker: the next page needs **Use here** | — (release stays best effort) |
+| A tab closed (or discarded) during a claim, after its claim write and before its reload becomes holder (it isn't holder yet, so it writes no marker: E5) | The lease names a page that's gone: the next page needs **Use here**. Never data | — (release stays best effort) |
 | Chrome's automatic (proactive) discards may skip the `freeze` event (untested: only an urgent discard could be triggered) | No marker: the next page needs **Use here** | Investigate if seen; release stays best effort |
+| A parked tab whose chat save is held, closed, reloaded or navigated away by hand (Refresh and every other reload the lease starts abort held chat saves first: E7) | ST's own "Leave site?" prompt. The held save is never sent either way | — |
 | A reply can't move to another device | A takeover waits for the reply (up to 60 s), then reloads | — |
 | Horde text replies are asynchronous: `/api/horde/generate-text` only submits the job, the reply comes from later `/api/horde/task-status` polls (E15) | A takeover doesn't wait for a Horde reply; its polls and save are held once the old page parks, and the reply is lost (never data) | Track Horde's polling, or a server plugin |
 | Group chats aren't reopened after a takeover (ST's context has no function that selects a group; E4) | Desktop lands on ST's start screen; `active` keeps the group. The app reopens groups by its own `chatFile` route | A group-select function in ST's context, or a dynamic import of ST's `group-chats.js` (owner decision) |
@@ -444,30 +446,30 @@ The app's own `window.__ttBridge` is not part of this contract.
 
 **Manual checklist, on the separate test install only** (never the real server: `CLAUDE.md` Hard Rules). Throwaway persona, lorebook, character and chat; Memory Books installed.
 
-- [ ] Two pages: the second parks; a stale page's chat, persona, card, lorebook and settings saves never reach the server
-- [ ] Use here: same chat reopened; switch time recorded. A group and a deleted character: start screen, logged. With ST's Auto-load chat on: the reopened chat wins
-- [ ] Two simultaneous Use here: exactly one holder
-- [ ] Takeover while generating (holder tab in front and in the background): claimer waits, reply saved before its claim lands. No model connected, and Stop: no stuck `busy` (cleared after the save or at the 3 s bound)
-- [ ] Save queued just before a takeover: held, or saved and visible in the new holder
-- [ ] Holder refresh: stays holder, epoch bumped. Duplicated tab: the older copy parks
-- [ ] Close the holder: the next tab claims without a click. Close an old tab after a takeover: the lease is untouched
-- [ ] Back/forward cache: a restored holder parks and reloads; a write at restore never reaches disk
-- [ ] Freeze, then discard, the holder (`chrome://discards`): a marker for its exact pair each time; the next tab claims without a click; a resumed tab with no claim since holds again at `epoch + 1` without a reload; a resumed tab after another page claimed parks (`lost`)
-- [ ] Held chat save before a reload: no "Leave site?"
-- [ ] Parked tab with Memory Books: held reads stay pending, no default files written
-- [ ] ST popup open before and after parking: overlay on top, Use here works
-- [ ] Overlay design: card, blurred backdrop, theme colors in a light and a dark ST theme; spinner static under reduced motion
-- [ ] Server unreachable: pages park, nothing sent after the restart
-- [ ] Lease write `EPERM` (Windows): retried, no false park
-- [ ] Unknown `format` in the lease file: page parks with the update message, writes nothing
-- [ ] Untested ST version: toast once, every request checked
-- [ ] Damaged lease file: "The lease file is damaged"; Take over anyway (warning, Cancel, confirm) → holder, the other tab parks. Unknown format: Refresh, then Take over anyway → format 1, marker repaired, other tabs park as held. Writes that keep failing (lease file locked): "Something went wrong"; Refresh after the lock is gone parks normally
-- [ ] Take over anyway during a reply: offered at 10 s, the claim lands right after the tap; the other device's reply is lost (its save held)
-- [ ] Turn off protection: warning, banner, requests go through unwrapped, the lease files untouched; Refresh → still off; other tabs protected; Turn protection back on → protected, parks or claims normally
-- [ ] Server unreachable: "Can't reach SillyTavern" (not the damaged text); Take over anyway while down stays `unreadable`. Server paused (accepts, never answers): "Can't reach SillyTavern" after about 10 s
-- [ ] Prerender: after a release, a typed address that Chrome prerendered (`activationStart` above 0) reloads when shown and becomes holder with no click
-- [ ] Model connection restored after a Use here reload; not pressed after an automatic claim at start. A backend that can't connect (not the Custom source, which bypasses its check): one `notConnected` toast within about 10 s
-- [ ] The app's checks: app spec checklist
+- [x] Two pages: the second parks; a stale page's chat, persona, card, lorebook and settings saves never reach the server
+- [x] Use here: same chat reopened; switch time recorded. A group and a deleted character: start screen, logged. With ST's Auto-load chat on: the reopened chat wins
+- [x] Two simultaneous Use here: exactly one holder
+- [x] Takeover while generating (holder tab in front and in the background): claimer waits, reply saved before its claim lands. No model connected, and Stop: no stuck `busy` (cleared after the save or at the 3 s bound)
+- [x] Save queued just before a takeover: held, or saved and visible in the new holder
+- [x] Holder refresh: stays holder, epoch bumped. Duplicated tab: the older copy parks
+- [x] Close the holder: the next tab claims without a click. Close an old tab after a takeover: the lease is untouched
+- [x] Back/forward cache: a restored holder parks and reloads; a write at restore never reaches disk
+- [x] Freeze, then discard, the holder (`chrome://discards`): a marker for its exact pair each time; the next tab claims without a click; a resumed tab with no claim since holds again at `epoch + 1` without a reload; a resumed tab after another page claimed parks (`lost`)
+- [x] Held chat save before a reload: no "Leave site?"
+- [x] Parked tab with Memory Books: held reads stay pending, no default files written
+- [x] ST popup open before and after parking: overlay on top, Use here works
+- [x] Overlay design: card, blurred backdrop, theme colors in a light and a dark ST theme; spinner static under reduced motion
+- [x] Server unreachable: pages park, nothing sent after the restart
+- [x] Lease write `EPERM` (Windows): retried, no false park
+- [x] Unknown `format` in the lease file: page parks with the update message, writes nothing
+- [x] Untested ST version: toast once, every request checked
+- [x] Damaged lease file: "The lease file is damaged"; Take over anyway (warning, Cancel, confirm) → holder, the other tab parks. Unknown format: Refresh, then Take over anyway → format 1, marker repaired, other tabs park as held. Writes that keep failing (lease file locked): "Something went wrong"; Refresh after the lock is gone parks normally
+- [x] Take over anyway during a reply: offered at 10 s, the claim lands right after the tap; the other device's reply is lost (its save held)
+- [x] Turn off protection: warning, banner, requests go through unwrapped, the lease files untouched; Refresh → still off; other tabs protected; Turn protection back on → protected, parks or claims normally
+- [x] Server unreachable: "Can't reach SillyTavern" (not the damaged text); Take over anyway while down stays `unreadable`. Server paused (accepts, never answers): "Can't reach SillyTavern" after about 10 s
+- [ ] Prerender: after a release, a typed address that Chrome prerendered (`activationStart` above 0) reloads when shown and becomes holder with no click. Not reproduced: Chrome didn't prerender in any try (unit-tested, `instance`)
+- [x] Model connection restored after a Use here reload; not pressed after an automatic claim at start. A backend that can't connect (not the Custom source, which bypasses its check): one `notConnected` toast within about 10 s
+- [x] The app's checks: app spec checklist (A10 against `v0.2.0-rc.4`, its scrim actions against `v0.2.0-rc.5`)
 
 ## 15. Verified in SillyTavern's source
 

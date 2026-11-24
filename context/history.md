@@ -2,6 +2,12 @@
 
 <!-- One entry per completed feature / fix, 3–5 lines max: what changed, cause/key decisions, gotchas, what's unverified, version. No verification logs or test counts. Nothing private. -->
 
+### 2026-11-23 — Release 0.2.0: E14 complete, README, version
+- E14 run on `v0.2.0-rc.4`; the items rc.5 touched (2, 3, 4 incl. a background holder, 6, 7, 8, 13–18) and its new checks (damaged, unknown format, failing writes, Take over anyway during a reply, Turn off protection, unreachable and hung server) re-run on `v0.2.0-rc.5`; the rest carried over (wrapper and file handling unchanged). Results outside the repo. The app: A10 against rc.4, its scrim actions against rc.5
+- README rewritten: what it does and why, install (per ST user on the server), the overlay and the ways out with three screenshots from the test install, toasts, the app, limits in plain words, bug reports, technical details. E13 gained two rows found in the run (a tab closed mid-claim leaves no marker; closing a parked tab with a held chat save shows ST's "Leave site?")
+- `manifest.json` and `EXTENSION_VERSION` `0.2.0`; `LEASE_VERSION` 1, `format` 1 (owner: first release). No code change
+- Unverified: a real Chrome prerender (never reproduced; unit-tested); Chrome's proactive discards (E13)
+
 ### 2026-11-23 — Never stuck: a way out of every parked state (for `v0.2.0-rc.5`)
 - A corrupt lease file, writes that keep failing, a lease-code error and `unknownFormat` parked with no working way out, and "Finishing a reply…" had no skip. Now every error state has **Refresh**, plus **Take over anyway** (a forced claim over whatever the file holds: new holder id, marker repaired, grace and verify) and **Turn off protection** (this tab only, a `sessionStorage` flag, the lease stands down after a reload; banner with Turn protection back on). Take over anyway also joins "Finishing a reply…" after 10 s. Always a tap after an in-card warning
 - New reasons `damaged` (2xx but invalid, vs `unreadable` = can't reach ST) and `error` (claim / bump writes exhausted, lease-code errors); `leaseState.actions` and `state: 'off'`; `__ttLease.takeOverAnyway / turnOffProtection / turnProtectionOn / refresh` (owner-approved E11). A prerendered page never decides and reloads when shown (same-tab prerender could have held with stale data). `__ttLease` is defined before the wrapper. Every lease read / write is aborted after 10 s and counts as "can't reach" (owner decision), so no state waits on a hung server

@@ -4,7 +4,7 @@
 // already runs in this page (the TravelingTavern app injects its own at document start).
 
 /** This extension's release version. Must equal manifest.json's `version` (checked by the tests). */
-const EXTENSION_VERSION = '0.0.1';
+const EXTENSION_VERSION = '0.2.0';
 /** The LEASE_VERSION of this extension's session-lease.js (checked by the tests). */
 const LEASE_VERSION = 1;
 

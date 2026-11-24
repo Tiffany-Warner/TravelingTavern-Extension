@@ -40,8 +40,8 @@ Spec: `context/specs/ext-0.2-session-lease-spec.md`. Decision and evidence: `con
 - [x] Slice 4: overlay and toasts (E9, E12)
 - [x] Slice 5: `busy` from generation requests (E8)
 - [x] Slice 6: reopen and reconnect after a takeover (E4, E10)
-- [x] Tag `v0.2.0-rc.1` on `dev` for the app to build and test against (`rc.2`–`rc.4` tagged for the app's fixes)
-- [ ] Full manual checklist on the test install against the rc (E14)
+- [x] Tag `v0.2.0-rc.1` on `dev` for the app to build and test against (`rc.2`–`rc.5` tagged for the app's fixes and the way-out buttons)
+- [x] Full manual checklist on the test install against the rc (E14: on rc.4, rc.5 re-runs; a real Chrome prerender not reproduced)
 - [ ] Release to `main`, tag `v0.2.0`
 
 ---
