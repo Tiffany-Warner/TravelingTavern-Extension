@@ -30,8 +30,9 @@
 0. **Release candidate** (when the app needs the code first): tag `vX.Y.Z-rc.N` on `dev` and push the tag. The app's feature branch pins it; both checklists run against it
 1. `dev` pushed, `node --test` passing; versions bumped together: `manifest.json` and `EXTENSION_VERSION` in `index.js`, and, if lease behavior or the app contract changed, `LEASE_VERSION` in `session-lease.js` and `index.js`
 2. PR `dev` → `main` titled with the version (e.g. `Release 0.2.0`), listing the history entries included and the manual checks done (spec checklist, two-page test)
-3. I merge with **Create a merge commit** (not squash or rebase: they make `main` and `dev` drift apart)
-4. Tag the merge commit `vX.Y.Z`; the app repo then bumps its submodule to it
+3. I merge with **Squash and merge**. Check that `main`'s tree equals `dev`'s (`git fetch`, then `git diff origin/dev origin/main` is empty)
+4. Tag the squash commit on `main` `vX.Y.Z` (annotated) and push the tag; the app repo then bumps its submodule to it
+5. **Merge `main` back into `dev`** (`git merge origin/main`, push `dev`) before any new work, so the next release PR doesn't show the old commits again
 
 ## Private Data
 

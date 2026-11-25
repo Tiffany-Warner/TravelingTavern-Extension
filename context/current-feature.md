@@ -2,7 +2,7 @@
 
 ## Session Lease `v0.2.0`
 
-**Status:** `chore/release-0.2.0`: E14 complete (rc.4, rc.5 re-runs), README, version `0.2.0`; next the release PR `dev` → `main` and the `v0.2.0` tag
+**Status:** `v0.2.0` released (squash merge `eb6e3af` on `main`, tag `v0.2.0`; `main` merged back into `dev`); next the app re-pins its submodule to `v0.2.0`
 **Spec:** `context/specs/ext-0.2-session-lease-spec.md` (E1–E15). App side: TravelingTavern's `session-lease-app-spec.md` (A1–A10)
 **Requirements and evidence:** `context/decisions/session-lease-spike.md` (R1–R44)
 
@@ -13,8 +13,8 @@
 3. [x] `fix/never-stuck` → `v0.2.0-rc.5`: every parked state has a way out (Refresh, Take over anyway, Turn off protection), prerender fix; E14 re-runs on it (`TravelingTavern-docs/release-0.2.0-e14-results.md`)
 4. [x] App: its feature branch re-pins `v0.2.0-rc.5`, adds the new actions to its scrim, re-tests A10 item 7 and decides D30; `0.1.20` implemented and tested against it (app spec checklist). D30 decided at the app's rc.4 re-pin (app spec D44); rc.5 scrim actions built and tested (app `831568f`)
 5. [x] `chore/release-0.2.0`: E14 complete (on rc.4, rc.5 re-runs); README; `manifest.json` and `EXTENSION_VERSION` → `0.2.0`, `LEASE_VERSION` kept at 1 (owner: first release); history entry
-6. [ ] **Next.** Release PR `dev` → `main` (`Release 0.2.0`: `manifest.json` + `EXTENSION_VERSION` `0.2.0`, `LEASE_VERSION` 1, AGPL-3.0-only from this release); owner merges with a merge commit; tag **`v0.2.0`**
-7. [ ] App re-pins its submodule to `v0.2.0` before its merge
+6. [x] Release PR `dev` → `main` (`Release 0.2.0`: `manifest.json` + `EXTENSION_VERSION` `0.2.0`, `LEASE_VERSION` 1, AGPL-3.0-only from this release); owner squash-merged (`eb6e3af`); tag **`v0.2.0`**
+7. [ ] **Next.** App re-pins its submodule to `v0.2.0` before its merge
 8. [ ] Owner reinstalls the extension on the real server from `main` (removed from it 2026-11-20, while `dev` carries lease code)
 
 ### Archives and cleanup (ask before each delete)
